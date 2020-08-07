@@ -65,7 +65,6 @@ function apply_changes!(node::JuMPNode)
     end
     @assert isnothing(pnode.parent)
     @assert !isnothing(pnode.model)
-    @show branch_objects
 
     # Shallow copy of the root model
     node.model = pnode.model

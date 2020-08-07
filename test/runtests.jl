@@ -70,7 +70,7 @@ end
     @test child2.parent == current_node
     @test child2.depth == 1
     @test child2.bound == current_node.bound
-    child1.branch = BB.VariableBranch(Dict{JuMP.VariableRef,Real}(),Dict(x=>0.5))
+    child2.branch = BB.VariableBranch(Dict{JuMP.VariableRef,Real}(),Dict(x=>0.5))
 
     children = Vector{BB.AbstractNode}()
     push!(children, child1)

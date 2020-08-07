@@ -1,41 +1,36 @@
 
+abstract type AbstractNode end
 abstract type AbstractBranch end
 
-mutable struct AbstractNode
-    id::Int
-    parent::Union{Nothing,AbstractNode}
-    depth::Int
-    branch::AbstractBranch
+push!(branches::Array{AbstractBranch,1}, b::AbstractBranch) = Base.push!(branches, b)
+push!(branches::Array{AbstractBranch,1}, b::Nothing) = branches
 
-    solution_status::MOI.TerminationStatusCode
-    bound::Real
-    solution::Dict{Int,Real}
-
-    function AbstractNode(
-            id = -1, 
-            parent = nothing, 
-            depth = 0, 
-            solution_status = MOI.OPTIMIZE_NOT_CALLED,
-            bound = -Inf,
-            solution = Dict())
-        N = new()
-        N.id = id
-        N.parent = parent
-        N.depth = depth
-        N.solution_status = solution_status
-        N.bound = bound
-        N.solution = solution
-        return N
-    end
+macro abstract_node_fields() 
+    return esc(quote
+        id::Int
+        parent::Union{Nothing,AbstractNode}
+        depth::Int
+        branch::Union{Nothing,T}
+        solution_status::MOI.TerminationStatusCode
+        bound::Real
+        solution::Dict{Any,Real}
+    end)
 end
 
-AbstractNode(parent::AbstractNode) = AbstractNode(
-    -1, 
-    parent, 
-    parent.depth + 1, 
-    MOI.OPTIMIZE_NOT_CALLED,
-    parent.bound,
-    Dict())
+# mutable struct AbstractNode{T<:AbstractBranch}
+#     @abstract_node_fields
+
+#     function AbstractNode(
+#             id = -1, 
+#             parent = nothing, 
+#             depth = 0, 
+#             branch = nothing,
+#             solution_status = MOI.OPTIMIZE_NOT_CALLED,
+#             bound = -Inf,
+#             solution = Dict{Any,Real}())
+#         return new{T}(id, parent, depth, branch, solution_status, bound, solution)
+#     end
+# end
 
 # return node solution
 node_solution(node::AbstractNode) = node.solution

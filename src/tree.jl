@@ -1,14 +1,11 @@
 
 mutable struct AbstractTree
-    model # root node model
-    optimizer::MOI.AbstractOptimizer
-
     node_counter::Int
     nodes::Vector{AbstractNode}
     processed::Vector{AbstractNode}
 
-    function AbstractTree(model, optimizer, node_counter::Int = 0)
-        return new(model, optimizer, node_counter, [], [])
+    function AbstractTree(node_counter::Int = 0)
+        return new(node_counter, [], [])
     end
 end
 
@@ -48,7 +45,7 @@ end
 processed!(tree::AbstractTree, node::AbstractNode) = Base.push!(tree.processed, node)
 
 # return the next search node
-function next_node(tree::AbstractTree)::AbstractNode
+function next_node(tree::AbstractTree)
     sort!(tree)
     node = Base.pop!(tree.nodes)
     apply_changes!(node)
@@ -56,4 +53,4 @@ function next_node(tree::AbstractTree)::AbstractNode
 end
 
 # best bound
-sort!(tree::AbstractTree) = Base.sort!(tree.nodes, by=x->x.dual_bound, rev=true)
+sort!(tree::AbstractTree) = Base.sort!(tree.nodes, by=x->x.bound, rev=true)

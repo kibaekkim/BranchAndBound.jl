@@ -10,8 +10,8 @@ model = Model(GLPK.Optimizer)
 @variable(model, 0 <= x <= 1)
 @objective(model, Min, x)
 
-tree = BB.AbstractTree(model, GLPK.Optimizer)
-node = BB.AbstractNode()
+tree = BB.AbstractTree()
+node = BB.JuMPNode{BB.VariableBranch}(model)
 
 @testset "Initial Tree" begin
     @test tree.node_counter == 0
@@ -23,14 +23,10 @@ end
     @test node.id == -1
     @test isnothing(node.parent)
     @test node.depth == 0
-    @test isnothing(node.model)
-    @test isnothing(node.reference_map)
-    @test length(node.variable_lower_bound_changes) == 0
-    @test length(node.variable_upper_bound_changes) == 0
-    @test length(node.constraint_changes) == 0
+    @test isnothing(node.branch)
     @test node.solution_status == MOI.OPTIMIZE_NOT_CALLED
-    @test isinf(node.primal_bound)
-    @test isinf(-node.dual_bound)
+    @test isinf(-node.bound)
+    @test !isnothing(node.model)
 end
 
 @testset "Tree with root" begin
@@ -45,15 +41,15 @@ current_node = BB.next_node(tree)
 
 @testset "Root node with model" begin
     @test !isnothing(current_node.model)
-    @test JuMP.lower_bound(current_node.reference_map[x]) == 0.
-    @test JuMP.upper_bound(current_node.reference_map[x]) == 1.
+    @test JuMP.lower_bound(x) == 0.
+    @test JuMP.upper_bound(x) == 1.
 end
 
 @testset "Bounding root node" begin
     BB.bound!(current_node)
     @test current_node.solution_status == MOI.OPTIMAL
-    @test current_node.dual_bound == 0.0
-    @test BB.node_solution(current_node, x) == 0.0
+    @test current_node.bound == 0.0
+    @test JuMP.value(x) == 0.0
 end
 
 @testset "Marked root node as processed" begin
@@ -64,19 +60,17 @@ end
 end
 
 @testset "Branching at root" begin
-    child1 = BB.AbstractNode(current_node)
+    child1 = BB.JuMPNode(current_node)
     @test child1.parent == current_node
     @test child1.depth == 1
-    @test child1.dual_bound == current_node.dual_bound
-    child1.variable_lower_bound_changes[x] = 0.5
-    child1.dual_bound = 0.5
+    @test child1.bound == current_node.bound
+    child1.branch = BB.VariableBranch(Dict(x=>0.5),Dict{JuMP.VariableRef,Real}())
 
-    child2 = BB.AbstractNode(current_node)
+    child2 = BB.JuMPNode(current_node)
     @test child2.parent == current_node
     @test child2.depth == 1
-    @test child2.dual_bound == current_node.dual_bound
-    child2.variable_upper_bound_changes[x] = 0.5
-    child2.dual_bound = 0.0
+    @test child2.bound == current_node.bound
+    child1.branch = BB.VariableBranch(Dict{JuMP.VariableRef,Real}(),Dict(x=>0.5))
 
     children = Vector{BB.AbstractNode}()
     push!(children, child1)
@@ -93,14 +87,15 @@ next_node = BB.next_node(tree)
 
 @testset "Child 1 with model" begin
     @test !isnothing(next_node.model)
-    @test JuMP.lower_bound(next_node.reference_map[x]) == 0.
-    @test JuMP.upper_bound(next_node.reference_map[x]) == 0.5
-    @test next_node.dual_bound == 0.0
+    print(next_node.model)
+    @test JuMP.lower_bound(x) == 0.
+    @test JuMP.upper_bound(x) == 0.5
+    @test next_node.bound == 0.0
 end
 
 @testset "Bounding Child 1 node" begin
     BB.bound!(next_node)
     @test next_node.solution_status == MOI.OPTIMAL
-    @test next_node.dual_bound == 0.0
-    @test BB.node_solution(next_node, x) == 0.0
+    @test next_node.bound == 0.0
+    @test JuMP.value(x) == 0.0
 end

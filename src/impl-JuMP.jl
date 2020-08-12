@@ -107,10 +107,10 @@ function mark_bound_changes!(node::JuMPNode, branch_objects::Array{AbstractBranc
         lb_changed = Dict{JuMP.VariableRef,Real}()
         ub_changed = Dict{JuMP.VariableRef,Real}()
         for (j,v) in branch.lb
-            lb_changed[j] = JuMP.lower_bound(j)
+            lb_changed[j] = JuMP.has_lower_bound(j) ? JuMP.lower_bound(j) : -Inf
         end
         for (j,v) in branch.ub
-            lb_changed[j] = JuMP.upper_bound(j)
+            ub_changed[j] = JuMP.has_upper_bound(j) ? JuMP.upper_bound(j) : Inf
         end
         Base.push!(node.auxiliary_data["bounds_changed"], VariableBranch(lb_changed, ub_changed))
     end

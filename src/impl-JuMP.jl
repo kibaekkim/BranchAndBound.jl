@@ -5,6 +5,8 @@ struct VariableBranch <: AbstractBranch
     ub::Dict{JuMP.VariableRef,Real}
 end
 
+empty_variable_bound() = Dict{JuMP.VariableRef,Real}()
+
 mutable struct JuMPNode{T<:AbstractBranch} <: AbstractNode
     @abstract_node_fields
 
@@ -27,6 +29,18 @@ end
 
 JuMPNode{T}(parent::JuMPNode{T}) where T<:AbstractBranch = JuMPNode{T}(nothing, parent, parent.depth + 1, parent.bound)
 JuMPNode(parent::JuMPNode{T}) where T<:AbstractBranch = JuMPNode{T}(parent)
+
+# Create child node with abstract branch object
+function create_child_node(current_node::JuMPNode{T}, branch::AbstractBranch) where T<:AbstractBranch
+    node = JuMPNode(current_node)
+    node.branch = branch
+    return node
+end
+
+# Create child node with variable bounds
+create_child_node(current_node::JuMPNode{T}, variable::JuMP.VariableRef, lb::Real, ub::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(Dict(variable=>lb), Dict(variable=>ub)))
+create_child_node_with_lb(current_node::JuMPNode{T}, variable::JuMP.VariableRef, lb::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(Dict(variable=>lb), empty_variable_bound()))
+create_child_node_with_ub(current_node::JuMPNode{T}, variable::JuMP.VariableRef, ub::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(empty_variable_bound(), Dict(variable=>ub)))
 
 # basic bounding function
 function bound!(node::JuMPNode)

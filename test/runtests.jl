@@ -60,17 +60,19 @@ end
 end
 
 @testset "Branching at root" begin
-    child1 = BB.JuMPNode(current_node)
-    @test child1.parent == current_node
-    @test child1.depth == 1
-    @test child1.bound == current_node.bound
-    child1.branch = BB.VariableBranch(Dict(x=>0.5),Dict{JuMP.VariableRef,Real}())
+    child1 = BB.create_child_node_with_lb(current_node, x, 0.5)
+    # child1 = BB.JuMPNode(current_node)
+    # @test child1.parent == current_node
+    # @test child1.depth == 1
+    # @test child1.bound == current_node.bound
+    # child1.branch = BB.VariableBranch(Dict(x=>0.5),Dict{JuMP.VariableRef,Real}())
 
-    child2 = BB.JuMPNode(current_node)
-    @test child2.parent == current_node
-    @test child2.depth == 1
-    @test child2.bound == current_node.bound
-    child2.branch = BB.VariableBranch(Dict{JuMP.VariableRef,Real}(),Dict(x=>0.5))
+    child2 = BB.create_child_node_with_ub(current_node, x, 0.5)
+    # child2 = BB.JuMPNode(current_node)
+    # @test child2.parent == current_node
+    # @test child2.depth == 1
+    # @test child2.bound == current_node.bound
+    # child2.branch = BB.VariableBranch(Dict{JuMP.VariableRef,Real}(),Dict(x=>0.5))
 
     children = Vector{BB.AbstractNode}()
     push!(children, child1)

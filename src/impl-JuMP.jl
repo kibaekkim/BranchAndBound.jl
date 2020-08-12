@@ -30,6 +30,14 @@ end
 JuMPNode{T}(parent::JuMPNode{T}) where T<:AbstractBranch = JuMPNode{T}(nothing, parent, parent.depth + 1, parent.bound)
 JuMPNode(parent::JuMPNode{T}) where T<:AbstractBranch = JuMPNode{T}(parent)
 
+# Initialize BNB tree
+function initialize_tree(root::JuMPNode{T})::AbstractTree where T<:AbstractBranch
+    tree = AbstractTree()
+    push!(tree, root)
+    return tree
+end
+initialize_tree(model::JuMP.Model, T = AbstractBranch)::AbstractTree = initialize_tree(JuMPNode{T}(model))
+
 # Create child node with abstract branch object
 function create_child_node(current_node::JuMPNode{T}, branch::AbstractBranch) where T<:AbstractBranch
     node = JuMPNode(current_node)

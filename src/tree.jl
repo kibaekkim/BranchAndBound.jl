@@ -16,9 +16,7 @@ function run(tree::AbstractTree)
         bound!(node)
         heuristics!(node)
         processed!(tree, node)
-
-        children = branch(node)
-        push!(tree, children)
+        branch!(tree, node)
     end
 end
 
@@ -43,6 +41,11 @@ end
 
 # mark node as processed
 processed!(tree::AbstractTree, node::AbstractNode) = Base.push!(tree.processed, node)
+
+function branch!(tree::AbstractTree, node::AbstractNode)
+    children = branch(node)
+    push!(tree, children)
+end
 
 # return the next search node
 function next_node(tree::AbstractTree)

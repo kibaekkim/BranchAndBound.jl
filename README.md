@@ -1,7 +1,10 @@
 # BranchAndBound.jl
 [![Build Status](https://travis-ci.com/kibaekkim/BranchAndBound.jl.svg?token=3N6HLyM8rqygf5Rmoqzp&branch=master)](https://travis-ci.com/kibaekkim/BranchAndBound.jl)
 
-This Julia package provides an abstract framework for branch-and-bound methods. 
+This Julia package provides an abstract framework for branch-and-bound methods. Applications of this package include:
+
+- a branch-and-bound method for mixed-integer linear programming (see `./examples/milp.jl`)
+- a branch-and-bound method for mixed-integer nonlinear programming (see `./examples/minlp.jl`)
 
 
 ## Installation

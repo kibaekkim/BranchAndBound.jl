@@ -1,11 +1,11 @@
 using BranchAndBound
 using JuMP
-using GLPK
+using Ipopt
 
 const BB = BranchAndBound
 
-# continuous relaxation of MILP
-m = Model(GLPK.Optimizer)
+# continuous relaxation of MINLP
+m = Model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
 
 # The following will be supported in the later version of JuMP.
 # @variable(m, x >= 0, Int)
@@ -16,7 +16,7 @@ m = Model(GLPK.Optimizer)
 @variable(m, y >= 0) # assume integrality
 
 @objective(m, Min, -x - y)
-@constraint(m, -2*x + 2*y >= 1)
+@constraint(m, -2*x*y + 2*y >= 1)
 @constraint(m, -8*x + 10*y <= 13)
 
 # Initialize BNB tree

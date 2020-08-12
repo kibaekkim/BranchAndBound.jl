@@ -2,7 +2,7 @@
 abstract type AbstractNode end
 abstract type AbstractBranch end
 
-push!(branches::Array{AbstractBranch,1}, b::AbstractBranch) = Base.push!(branches, b)
+push!(branches::Array{AbstractBranch,1}, b::AbstractBranch) = Base.pushfirst!(branches, b)
 push!(branches::Array{AbstractBranch,1}, b::Nothing) = branches
 
 macro abstract_node_fields() 

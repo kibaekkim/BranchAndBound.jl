@@ -5,6 +5,8 @@ struct VariableBranch <: AbstractBranch
     ub::Dict{JuMP.VariableRef,Real}
 end
 
+empty_variable_bound() = Dict{JuMP.VariableRef,Real}()
+
 mutable struct JuMPNode{T<:AbstractBranch} <: AbstractNode
     @abstract_node_fields
 
@@ -27,6 +29,26 @@ end
 
 JuMPNode{T}(parent::JuMPNode{T}) where T<:AbstractBranch = JuMPNode{T}(nothing, parent, parent.depth + 1, parent.bound)
 JuMPNode(parent::JuMPNode{T}) where T<:AbstractBranch = JuMPNode{T}(parent)
+
+# Initialize BNB tree
+function initialize_tree(root::JuMPNode{T})::AbstractTree where T<:AbstractBranch
+    tree = AbstractTree()
+    push!(tree, root)
+    return tree
+end
+initialize_tree(model::JuMP.Model, T = AbstractBranch)::AbstractTree = initialize_tree(JuMPNode{T}(model))
+
+# Create child node with abstract branch object
+function create_child_node(current_node::JuMPNode{T}, branch::AbstractBranch) where T<:AbstractBranch
+    node = JuMPNode(current_node)
+    node.branch = branch
+    return node
+end
+
+# Create child node with variable bounds
+create_child_node(current_node::JuMPNode{T}, variable::JuMP.VariableRef, lb::Real, ub::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(Dict(variable=>lb), Dict(variable=>ub)))
+create_child_node_with_lb(current_node::JuMPNode{T}, variable::JuMP.VariableRef, lb::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(Dict(variable=>lb), empty_variable_bound()))
+create_child_node_with_ub(current_node::JuMPNode{T}, variable::JuMP.VariableRef, ub::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(empty_variable_bound(), Dict(variable=>ub)))
 
 # basic bounding function
 function bound!(node::JuMPNode)
@@ -93,10 +115,10 @@ function mark_bound_changes!(node::JuMPNode, branch_objects::Array{AbstractBranc
         lb_changed = Dict{JuMP.VariableRef,Real}()
         ub_changed = Dict{JuMP.VariableRef,Real}()
         for (j,v) in branch.lb
-            lb_changed[j] = JuMP.lower_bound(j)
+            lb_changed[j] = JuMP.has_lower_bound(j) ? JuMP.lower_bound(j) : -Inf
         end
         for (j,v) in branch.ub
-            lb_changed[j] = JuMP.upper_bound(j)
+            ub_changed[j] = JuMP.has_upper_bound(j) ? JuMP.upper_bound(j) : Inf
         end
         Base.push!(node.auxiliary_data["bounds_changed"], VariableBranch(lb_changed, ub_changed))
     end

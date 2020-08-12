@@ -6,8 +6,15 @@ const BB = BranchAndBound
 
 # continuous relaxation of MILP
 m = Model(GLPK.Optimizer)
-@variable(m, x >= 0)
-@variable(m, y >= 0)
+
+# The following will be supported in the later version of JuMP.
+# @variable(m, x >= 0, Int)
+# @variable(m, y >= 0, Int)
+# undo_relax = JuMP.relax_integrality(m)
+
+@variable(m, x >= 0) # assume integrality
+@variable(m, y >= 0) # assume integrality
+
 @objective(m, Min, -x - y)
 @constraint(m, -2*x + 2*y >= 1)
 @constraint(m, -8*x + 10*y <= 13)

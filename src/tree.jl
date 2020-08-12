@@ -3,15 +3,18 @@ mutable struct AbstractTree
     node_counter::Int
     nodes::Vector{AbstractNode}
     processed::Vector{AbstractNode}
+    best_bound::Real     # e.g., lower bound in minimizing MILP
+    best_incumbent::Real # e.g., upper bound in minimizing MILP
 
     function AbstractTree(node_counter::Int = 0)
-        return new(node_counter, [], [])
+        return new(node_counter, [], [], -Inf, Inf)
     end
 end
 
 function run(tree::AbstractTree)
     while !termination(tree)
         node = next_node(tree)
+        update_best_bound!(tree)
 
         bound!(node)
         heuristics!(node)
@@ -41,6 +44,12 @@ end
 
 # mark node as processed
 processed!(tree::AbstractTree, node::AbstractNode) = Base.push!(tree.processed, node)
+
+function update_best_bound!(tree::AbstractTree)
+    if !isempty(tree)
+        tree.best_bound = Base.minimum([node.bound for node in tree.nodes])
+    end
+end
 
 function branch!(tree::AbstractTree, node::AbstractNode)
     children = branch(node)

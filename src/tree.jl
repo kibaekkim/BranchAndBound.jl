@@ -24,7 +24,7 @@ end
 
 # basic termination function
 termination(tree::AbstractTree) = isempty(tree)
-isempty(tree::AbstractTree) = isempty(tree.nodes)
+isempty(tree::AbstractTree) = Base.isempty(tree.nodes)
 
 # add node to tree
 function push!(tree::AbstractTree, node::AbstractNode)

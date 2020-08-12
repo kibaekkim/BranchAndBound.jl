@@ -1,5 +1,6 @@
 # BranchAndBound.jl
 [![Build Status](https://travis-ci.com/kibaekkim/BranchAndBound.jl.svg?token=3N6HLyM8rqygf5Rmoqzp&branch=master)](https://travis-ci.com/kibaekkim/BranchAndBound.jl)
+[![codecov](https://codecov.io/gh/kibaekkim/BranchAndBound.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/kibaekkim/BranchAndBound.jl)
 
 This Julia package provides an abstract framework for branch-and-bound methods. Applications of this package include:
 

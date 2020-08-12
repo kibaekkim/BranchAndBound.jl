@@ -61,7 +61,7 @@ function bound!(node::JuMPNode)
         for v in vrefs
             node.solution[v] = JuMP.value(v)
         end
-    elseif node.solution_status == MOI.INFEASIBLE
+    elseif node.solution_status in [MOI.INFEASIBLE,MOI.LOCALLY_INFEASIBLE]
         node.bound = -Inf
     elseif node.solution_status == MOI.DUAL_INFEASIBLE
         node.bound = Inf

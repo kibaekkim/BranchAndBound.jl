@@ -3,8 +3,8 @@ mutable struct AbstractTree
     node_counter::Int
     nodes::Vector{AbstractNode}
     processed::Vector{AbstractNode}
-    best_bound::Real     # e.g., lower bound in minimizing MILP
-    best_incumbent::Real # e.g., upper bound in minimizing MILP
+    best_bound::Real     # e.g., lower bound for minimization
+    best_incumbent::Real # e.g., upper bound for minimization
 
     function AbstractTree(node_counter::Int = 0)
         return new(node_counter, [], [], -Inf, Inf)

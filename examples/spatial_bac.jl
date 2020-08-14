@@ -12,7 +12,7 @@ mutable struct SpatialBCBranch <: BB.AbstractBranch
     wjj::JuMP.VariableRef
     wr::JuMP.VariableRef
     wi::JuMP.VariableRef
-    mod_branch::Union{ComplexVariableBranch, VariableBranch}
+    mod_branch::Union{ComplexVariableBranch, VariableBranch} # this capture either a changed bound for Wij and Tij, or a changed bound for Wii/Wjj 
     bounds::NTuple{6, <:Real} # Lii, Uii, Ljj, Ujj, Lij, Uij
     valid_ineq_coeffs::NTuple{5, <:Real} # π coefficients
 end

@@ -36,7 +36,7 @@ function push!(tree::AbstractTree, node::AbstractNode)
 end
 
 # add a set of nodes to tree
-function push!(tree::AbstractTree, nodes::Vector{AbstractNode})
+function push!(tree::AbstractTree, nodes::Vector{T}) where T<:AbstractNode
     for node in nodes
         push!(tree, node)
     end

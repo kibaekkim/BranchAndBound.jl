@@ -6,6 +6,15 @@ using MathOptInterface
 const BB = BranchAndBound
 const MOI = MathOptInterface
 
+@testset "Abstract Node" begin
+    struct MyNode <: BB.AbstractNode end
+    node = MyNode()
+    @test BB.branch(node) == []
+    BB.bound!(node)
+    BB.heuristics!(node)
+    BB.apply_changes!(node)
+end
+
 model = Model(GLPK.Optimizer)
 @variable(model, 0 <= x <= 1)
 @objective(model, Min, x)
@@ -59,18 +68,22 @@ end
 
 @testset "Marked root node as processed" begin
     BB.processed!(tree, current_node)
-    @test isempty(tree.nodes)
+    @test BB.termination(tree)
     @test length(tree.processed) == 1
     @test tree.processed[1] == current_node
+end
+
+@testset "Empty branching" begin
+    BB.branch!(tree, current_node)
+    @test tree.node_counter == 1
+    @test length(tree.nodes) == 0
+    @test length(tree.processed) == 1
 end
 
 @testset "Branching at root" begin
     child1 = BB.create_child_node_with_lb(current_node, x, 0.5)
     child2 = BB.create_child_node_with_ub(current_node, x, 0.5)
-
-    BB.push!(tree, child1)
-    BB.push!(tree, child2)
-
+    BB.push!(tree, [child1,child2])
     @test tree.node_counter == 3
     @test length(tree.nodes) == 2
     @test length(tree.processed) == 1

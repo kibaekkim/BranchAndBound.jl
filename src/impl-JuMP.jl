@@ -50,6 +50,13 @@ create_child_node(current_node::JuMPNode{T}, variable::JuMP.VariableRef, lb::Rea
 create_child_node_with_lb(current_node::JuMPNode{T}, variable::JuMP.VariableRef, lb::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(Dict(variable=>lb), empty_variable_bound()))
 create_child_node_with_ub(current_node::JuMPNode{T}, variable::JuMP.VariableRef, ub::Real) where T<:AbstractBranch = create_child_node(current_node, VariableBranch(empty_variable_bound(), Dict(variable=>ub)))
 
+function processed!(tree::AbstractTree, node::JuMPNode)
+    # Rollback the branch objects
+    adjust_branch!(node.auxiliary_data["bounds_changed"])
+    
+    Base.push!(tree.processed, node)
+end
+
 # basic bounding function
 function bound!(node::JuMPNode)
     JuMP.optimize!(node.model)
@@ -69,9 +76,6 @@ function bound!(node::JuMPNode)
         @warn "Unexpected node solution status: $(node.solution_status)"
         node.bound = -Inf
     end
-
-    # Rollback the branch objects
-    adjust_branch!(node.auxiliary_data["bounds_changed"])
 end
 
 function apply_changes!(node::JuMPNode)

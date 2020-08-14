@@ -1,4 +1,3 @@
-
 abstract type AbstractNode end
 abstract type AbstractBranch end
 
@@ -16,24 +15,6 @@ macro abstract_node_fields()
         solution::Dict{Any,Real}
     end)
 end
-
-# mutable struct AbstractNode{T<:AbstractBranch}
-#     @abstract_node_fields
-
-#     function AbstractNode(
-#             id = -1, 
-#             parent = nothing, 
-#             depth = 0, 
-#             branch = nothing,
-#             solution_status = MOI.OPTIMIZE_NOT_CALLED,
-#             bound = -Inf,
-#             solution = Dict{Any,Real}())
-#         return new{T}(id, parent, depth, branch, solution_status, bound, solution)
-#     end
-# end
-
-# return node solution
-node_solution(node::AbstractNode) = node.solution
 
 # empty branching function
 branch(node::AbstractNode)::Vector{AbstractNode} = []

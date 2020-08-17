@@ -172,12 +172,12 @@ function get_LU_from_branches(node::BB.AbstractNode, i::Int64, j::Int64)::NTuple
         end
         pnode = node.parent
     end
-    isnan(Lii) && (Lii = node.auxiliary_data["Lii"][i])
-    isnan(Uii) && (Uii = node.auxiliary_data["Uii"][i])
-    isnan(Ljj) && (Ljj = node.auxiliary_data["Lii"][j])
-    isnan(Ujj) && (Ujj = node.auxiliary_data["Uii"][j])
-    isnan(Lij) && (Lij = node.auxiliary_data["Lij"][(i,j)])
-    isnan(Uij) && (Uij = node.auxiliary_data["Uij"][(i,j)])
+    isnan(Lii) && (Lii = pnode.auxiliary_data["Lii"][i])
+    isnan(Uii) && (Uii = pnode.auxiliary_data["Uii"][i])
+    isnan(Ljj) && (Ljj = pnode.auxiliary_data["Lii"][j])
+    isnan(Ujj) && (Ujj = pnode.auxiliary_data["Uii"][j])
+    isnan(Lij) && (Lij = pnode.auxiliary_data["Lij"][(i,j)])
+    isnan(Uij) && (Uij = pnode.auxiliary_data["Uij"][(i,j)])
     return (Lii, Uii, Ljj, Ujj, Lij, Uij)
 end
 
@@ -219,6 +219,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
         for cref in node.auxiliary_data["prev_branch_crefs"]
             delete(model, cref)
         end
+        delete!(node.auxiliary_data, "prev_branch_crefs")
     end
 
     i = branch.i
@@ -291,30 +292,51 @@ function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch
     return new_branches
 end
 
+# return a deepcopy of SpatialBCBranch for everything except for model
+# this is needed to ensure variable references are not deepcopied
+# the mod_branch will not be duplicated here if it is not nothing
+function branch_copy(branch::SpatialBCBranch)
+    return SpatialBCBranch(branch.i, branch.j, branch.wii, branch.wjj, branch.wr, branch.wi, 
+                           branch.mod_branch, deepcopy(branch.bounds), deepcopy(branch.valid_ineq_coeffs))
+end
+
 function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     if node.bound >= tree.best_incumbent
         @info " Fathomed by bound"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
+        root = find_root(node)
+        pm = root.auxiliary_data["PM"]
         (i,j) = find_min_eigen(node)
         new_sbc_branch = create_sbc_branch(i, j, node)
         (new_i,new_j) = find_branching_entry(new_sbc_branch, node) # This function implements MVSB/MVWB/RBEB
-        up_bounds_arr = [i for i in new_sbc_branch.bounds]
-        down_bounds_arr = [i for i in new_sbc_branch.bounds]
+        up_bounds_arr = [k for k in new_sbc_branch.bounds]
+        down_bounds_arr = [k for k in new_sbc_branch.bounds]
         if new_i != new_j # branch on Wij
             up_bounds_arr[5] = (up_bounds_arr[5] + up_bounds_arr[6]) / 2
             down_bounds_arr[6] = (down_bounds_arr[5] + down_bounds_arr[6]) / 2
+            vpair = (PM.var(pm, :WR)[new_i,new_j], PM.var(pm, :WI)[i,j])
+            up_mod_branch = ComplexVariableBranch(Dict(vpair => up_bounds_arr[5]), Dict(vpair => up_bounds_arr[6]))
+            down_mod_branch = ComplexVariableBranch(Dict(vpair => down_bounds_arr[5]), Dict(vpair => down_bounds_arr[6]))
         elseif new_i == i # branch on Wii
             up_bounds_arr[1] = (up_bounds_arr[1] + up_bounds_arr[2]) / 2
             down_bounds_arr[2] = (down_bounds_arr[1] + down_bounds_arr[2]) / 2
+            v = PM.var(pm, :WR)[new_i, new_j]
+            up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[1]), Dict(v => up_bounds_arr[2]))
+            down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[1]), Dict(v => down_bounds_arr[2]))
         else # branch on Wjj
             up_bounds_arr[3] = (up_bounds_arr[3] + up_bounds_arr[4]) / 2
             down_bounds_arr[4] = (down_bounds_arr[3] + down_bounds_arr[4]) / 2
+            v = PM.var(pm, :WR)[new_i, new_j]
+            up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[3]), Dict(v => up_bounds_arr[4]))
+            down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[3]), Dict(v => down_bounds_arr[4]))
         end
-        next_branch_up = deepcopy(new_sbc_branch)
+        next_branch_up = branch_copy(new_sbc_branch)
         next_branch_down = new_sbc_branch
         next_branch_up.bounds = Tuple(up_bounds_arr)
         next_branch_down.bounds = Tuple(down_bounds_arr)
+        next_branch_up.mod_branch = up_mod_branch
+        next_branch_down.mod_branch = down_mod_branch
         child_up = BB.create_child_node(node, next_branch_up)
         child_down = BB.create_child_node(node, next_branch_down)
         BB.push!(tree, child_up)
@@ -374,7 +396,7 @@ end
 ###########################################################################
 
 # read data, and formulate root model using PowerModels
-file = "/home/weiqizhang/.julia/dev/BranchAndBound/data/case9.m"
+file = "/home/weiqizhang/.julia/dev/BranchAndBound/data/case5.m"
 data = parse_file(file)
 pm = instantiate_model(data, NodeWRMPowerModel, build_opf)
 optimizer = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)

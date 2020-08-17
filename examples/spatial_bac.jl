@@ -1,5 +1,5 @@
 using BranchAndBound, JuMP, PowerModels, DeNet
-using Mosek, MosekTools, Ipopt
+using Mosek, MosekTools, Ipopt, COSMO
 using LinearAlgebra
 const BB = BranchAndBound
 const PM = PowerModels
@@ -160,24 +160,28 @@ function get_LU_from_branches(node::BB.AbstractNode, i::Int64, j::Int64)::NTuple
                 Uij = first(values(mod_branch.ub))
             end
         elseif mod_branch isa BB.VariableBranch
-            if sbc_branch.i == i && isnan(Lii)
-                Lii = first(values(mod_branch.lb))
-                Uii = first(values(mod_branch.ub))
-            elseif sbc_branch.i == j && isnan(Ljj)
-                Ljj = first(values(mod_branch.lb))
-                Ujj = first(values(mod_branch.ub))
+            # problematic here: i actually cannot tell whether I'm modifying Lii or Ljj...
+            if (sbc_branch.i, sbc_branch.j) == (i, j)
+                if sbc_branch.wii == first(keys(mod_branch.lb)) && isnan(Lii) # if Lii is not assigned, and mod_branch IS on wii
+                    Lii = first(values(mod_branch.lb))
+                    Uii = first(values(mod_branch.ub))
+                elseif sbc_branch.wjj == first(keys(mod_branch.lb)) && isnan(Ljj)
+                    Ljj = first(values(mod_branch.lb))
+                    Ujj = first(values(mod_branch.ub))
+                end
             end
         else
             error("Invalid branch type $(typeof(mod_branch))")
         end
-        pnode = node.parent
+        pnode = pnode.parent
     end
-    isnan(Lii) && (Lii = pnode.auxiliary_data["Lii"][i])
-    isnan(Uii) && (Uii = pnode.auxiliary_data["Uii"][i])
-    isnan(Ljj) && (Ljj = pnode.auxiliary_data["Lii"][j])
-    isnan(Ujj) && (Ujj = pnode.auxiliary_data["Uii"][j])
-    isnan(Lij) && (Lij = pnode.auxiliary_data["Lij"][(i,j)])
-    isnan(Uij) && (Uij = pnode.auxiliary_data["Uij"][(i,j)])
+    if isnan(Lii) Lii = pnode.auxiliary_data["Lii"][i] end
+    if isnan(Uii) Uii = pnode.auxiliary_data["Uii"][i] end
+    if isnan(Ljj) Ljj = pnode.auxiliary_data["Lii"][j] end
+    if isnan(Ujj) Ujj = pnode.auxiliary_data["Uii"][j] end
+    if isnan(Lij) Lij = pnode.auxiliary_data["Lij"][(i,j)] end
+    if isnan(Uij) Uij = pnode.auxiliary_data["Uij"][(i,j)] end
+
     return (Lii, Uii, Ljj, Ujj, Lij, Uij)
 end
 
@@ -304,6 +308,8 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     if node.bound >= tree.best_incumbent
         @info " Fathomed by bound"
+    elseif node.depth >= 50
+        @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
         root = find_root(node)
         pm = root.auxiliary_data["PM"]
@@ -318,18 +324,21 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             vpair = (PM.var(pm, :WR)[new_i,new_j], PM.var(pm, :WI)[i,j])
             up_mod_branch = ComplexVariableBranch(Dict(vpair => up_bounds_arr[5]), Dict(vpair => up_bounds_arr[6]))
             down_mod_branch = ComplexVariableBranch(Dict(vpair => down_bounds_arr[5]), Dict(vpair => down_bounds_arr[6]))
+            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[5]),$(up_bounds_arr[5]),$(up_bounds_arr[6])]."
         elseif new_i == i # branch on Wii
             up_bounds_arr[1] = (up_bounds_arr[1] + up_bounds_arr[2]) / 2
             down_bounds_arr[2] = (down_bounds_arr[1] + down_bounds_arr[2]) / 2
             v = PM.var(pm, :WR)[new_i, new_j]
             up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[1]), Dict(v => up_bounds_arr[2]))
             down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[1]), Dict(v => down_bounds_arr[2]))
+            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[1]),$(up_bounds_arr[1]),$(up_bounds_arr[2])]."
         else # branch on Wjj
             up_bounds_arr[3] = (up_bounds_arr[3] + up_bounds_arr[4]) / 2
             down_bounds_arr[4] = (down_bounds_arr[3] + down_bounds_arr[4]) / 2
             v = PM.var(pm, :WR)[new_i, new_j]
             up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[3]), Dict(v => up_bounds_arr[4]))
             down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[3]), Dict(v => down_bounds_arr[4]))
+            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[3]),$(up_bounds_arr[3]),$(up_bounds_arr[4])]."
         end
         next_branch_up = branch_copy(new_sbc_branch)
         next_branch_down = new_sbc_branch
@@ -346,13 +355,22 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     end
 end
 
+# implement depth first rule
+function BB.next_node(tree::BB.AbstractTree)
+    # best bound
+    sort!(tree::BB.AbstractTree) = Base.sort!(tree.nodes, by=x->x.depth)
+    sort!(tree)
+    node = Base.pop!(tree.nodes)
+    return node
+end
+
 function BB.termination(tree::BB.AbstractTree)
     @info "Tree nodes: processed $(length(tree.processed)), left $(length(tree.nodes)), total $(tree.node_counter), best bound $(tree.best_bound), best incumbent $(tree.best_incumbent)"
     if BB.isempty(tree)
         @info "Completed the tree search"
         return true
     end
-    if length(tree.processed) >= 20
+    if length(tree.processed) >= 10000
         @info "Reached node limit"
         return true
     end
@@ -397,10 +415,11 @@ end
 
 # read data, and formulate root model using PowerModels
 file = "/home/weiqizhang/.julia/dev/BranchAndBound/data/case5.m"
+# file = "/home/weiqizhang/anl/pglib-opf/api/pglib_opf_case24_ieee_rts__api.m"
 data = parse_file(file)
 pm = instantiate_model(data, NodeWRMPowerModel, build_opf)
 optimizer = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
-# optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
+# optimizer = optimizer_with_attributes(COSMO.Optimizer, "verbose" => false)
 set_optimizer(pm.model, optimizer)
 
 # collect data

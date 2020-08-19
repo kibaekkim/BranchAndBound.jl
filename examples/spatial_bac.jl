@@ -105,85 +105,54 @@ function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     pm = find_root(node).auxiliary_data["PM"]
     wr = var(pm, :WR)
     wi = var(pm, :WI)
-    min_lambda = Inf
-    min_id = ()
+    max_lambda = -Inf
+    max_id = ()
     node_solution = node.solution
     for ((i,j),_) in ref(pm, :buspairs)
         lambda = 0.5 * (node_solution[wr[i,i]] - node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
-        if lambda < min_lambda
-            min_id = (i,j)
-            min_lambda = lambda
+        if lambda > max_lambda
+            max_id = (i,j)
+            max_lambda = lambda
         end
     end
-    return min_id
+    return max_id
 end
 
-#=
-function get_LU_from_branches(node::BB.AbstractNode)::NTuple{4, Dict}
-    Lii = Dict()
-    Uii = Dict()
-    Lij = Dict()
-    Uij = Dict()
-    pnode = node
-    while !isnothing(pnode.parent)
-        sbc_branch = pnode.branch
-        mod_branch = sbc_branch.mod_branch
-        if mod_branch isa ComplexVariableBranch
-            Lij[(sbc_branch.i, sbc_branch.j)] = first(values(mod_branch.lb))
-            Uij[(sbc_branch.i, sbc_branch.j)] = first(values(mod_branch.ub))
-        elseif mod_branch isa BB.VariableBranch
-            Lii[sbc_branch.i] = first(values(mod_branch.lb))
-            Uii[sbc_branch.i] = first(values(mod_branch.ub))
-        else
-            error("Invalid branch type $(typeof(mod_branch))")
-        end
-        pnode = node.parent
-    end
-    Lii = merge(data.auxiliary_data["Lii"], Lii)
-    Uii = merge(data.auxiliary_data["Uii"], Uii)
-    Lij = merge(data.auxiliary_data["Lij"], Lij)
-    Uij = merge(data.auxiliary_data["Uij"], Uij)
-    return (Lii, Uii, Lij, Uij)
-end
-=#
-
-# Output (Lii, Uii, Ljj, Ujj, Lij, Uij)
 function get_LU_from_branches(node::BB.AbstractNode, i::Int64, j::Int64)::NTuple{6, <:Real}
     pnode = node
-    (Lii, Uii, Ljj, Ujj, Lij, Uij) = Tuple([NaN for i in 1:6])
+    LU = [NaN for i in 1:6]
     while !isnothing(pnode.parent)
         sbc_branch = pnode.branch
         mod_branch = sbc_branch.mod_branch
-        if mod_branch isa ComplexVariableBranch
-            if (sbc_branch.i, sbc_branch.j) == (i, j) && isnan(Lij)
-                Lij = first(values(mod_branch.lb))
-                Uij = first(values(mod_branch.ub))
+        if sbc_branch.i == i && sbc_branch.j == j
+            for i in eachindex(LU)
+                if isnan(LU[i]) LU[i] = sbc_branch.bounds[i] end
             end
-        elseif mod_branch isa BB.VariableBranch
-            # problematic here: i actually cannot tell whether I'm modifying Lii or Ljj...
-            if (sbc_branch.i, sbc_branch.j) == (i, j)
-                if sbc_branch.wii == first(keys(mod_branch.lb)) && isnan(Lii) # if Lii is not assigned, and mod_branch IS on wii
-                    Lii = first(values(mod_branch.lb))
-                    Uii = first(values(mod_branch.ub))
-                elseif sbc_branch.wjj == first(keys(mod_branch.lb)) && isnan(Ljj)
-                    Ljj = first(values(mod_branch.lb))
-                    Ujj = first(values(mod_branch.ub))
-                end
-            end
-        else
-            error("Invalid branch type $(typeof(mod_branch))")
+        elseif sbc_branch.i == i
+            if isnan(LU[1]) LU[1] = sbc_branch.bounds[1] end
+            if isnan(LU[2]) LU[2] = sbc_branch.bounds[2] end
+        elseif sbc_branch.i == j
+            if isnan(LU[3]) LU[3] = sbc_branch.bounds[1] end
+            if isnan(LU[4]) LU[4] = sbc_branch.bounds[2] end
+        elseif sbc_branch.j == i
+            if isnan(LU[1]) LU[1] = sbc_branch.bounds[3] end
+            if isnan(LU[2]) LU[2] = sbc_branch.bounds[4] end
+        elseif sbc_branch.j == j
+            if isnan(LU[3]) LU[3] = sbc_branch.bounds[3] end
+            if isnan(LU[4]) LU[4] = sbc_branch.bounds[4] end
         end
         pnode = pnode.parent
     end
-    if isnan(Lii) Lii = pnode.auxiliary_data["Lii"][i] end
-    if isnan(Uii) Uii = pnode.auxiliary_data["Uii"][i] end
-    if isnan(Ljj) Ljj = pnode.auxiliary_data["Lii"][j] end
-    if isnan(Ujj) Ujj = pnode.auxiliary_data["Uii"][j] end
-    if isnan(Lij) Lij = pnode.auxiliary_data["Lij"][(i,j)] end
-    if isnan(Uij) Uij = pnode.auxiliary_data["Uij"][(i,j)] end
+    if isnan(LU[1]) LU[1] = pnode.auxiliary_data["Lii"][i] end
+    if isnan(LU[2]) LU[2] = pnode.auxiliary_data["Uii"][i] end
+    if isnan(LU[3]) LU[3] = pnode.auxiliary_data["Lii"][j] end
+    if isnan(LU[4]) LU[4] = pnode.auxiliary_data["Uii"][j] end
+    if isnan(LU[5]) LU[5] = pnode.auxiliary_data["Lij"][(i,j)] end
+    if isnan(LU[6]) LU[6] = pnode.auxiliary_data["Uij"][(i,j)] end
 
-    return (Lii, Uii, Ljj, Ujj, Lij, Uij)
+    return Tuple(LU)
 end
+
 
 # this function creates the 6 possible node candidates right after the new branch
 # needed for MVSB, where we need to solve the problems of all 6 node candidates
@@ -308,7 +277,7 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     if node.bound >= tree.best_incumbent
         @info " Fathomed by bound"
-    elseif node.depth >= 50
+    elseif node.depth >= 25
         @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
         root = find_root(node)
@@ -358,8 +327,8 @@ end
 # implement depth first rule
 function BB.next_node(tree::BB.AbstractTree)
     # best bound
-    sort!(tree::BB.AbstractTree) = Base.sort!(tree.nodes, by=x->x.depth)
-    sort!(tree)
+    # sort!(tree::BB.AbstractTree) = Base.sort!(tree.nodes, by=x->x.depth)
+    BB.sort!(tree)
     node = Base.pop!(tree.nodes)
     return node
 end
@@ -378,14 +347,10 @@ function BB.termination(tree::BB.AbstractTree)
 end
 
 # This makes original adjust_branch! invalid
-function BB.adjust_branch!(branch_objects::Array{SpatialBCBranch,1})
-    return
-end
+BB.adjust_branch!(branch_objects::Array{SpatialBCBranch,1}) = nothing
 
 # This makes original apply_changes! invalid
-function BB.apply_changes!(node::BB.JuMPNode)
-    return
-end
+BB.apply_changes!(node::BB.JuMPNode) = nothing
 
 function BB.bound!(node::BB.JuMPNode)
     node.model = find_root(node).model

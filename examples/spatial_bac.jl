@@ -172,29 +172,82 @@ function delete_prev_branch_constr!(model::JuMP.Model, node::BB.AbstractNode)
     end
 end
 
-function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
-    function _make_fake_branch(branch::SpatialBCBranch, mode::String)
-        (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
-        if mode == "Wii_up" Lii = (Lii + Uii) / 2
-        elseif mode == "Wii_down" Uii = (Lii + Uii) / 2
-        elseif mode == "Wjj_up" Ljj = (Ljj + Ujj) / 2
-        elseif mode == "Wjj_down" Ujj = (Ljj + Ujj) / 2
-        elseif mode == "Wij_up" Lij = (Lij + Uij) / 2
-        elseif mode == "Wij_down" Uij = (Lij + Uij) / 2
+function _make_fake_branch(branch::SpatialBCBranch, mode::String)
+    (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
+    if mode == "Wii_up" Lii = (Lii + Uii) / 2
+    elseif mode == "Wii_down" Uii = (Lii + Uii) / 2
+    elseif mode == "Wjj_up" Ljj = (Ljj + Ujj) / 2
+    elseif mode == "Wjj_down" Ujj = (Ljj + Ujj) / 2
+    elseif mode == "Wij_up" Lij = (Lij + Uij) / 2
+    elseif mode == "Wij_down" Uij = (Lij + Uij) / 2
+    end
+    new_bounds = (Lii, Uii, Ljj, Ujj, Lij, Uij)
+    new_π = compute_π(new_bounds)
+    return SpatialBCBranch(branch.i, branch.j, branch.wii, branch.wjj, branch.wr, branch.wi, nothing, 
+                            new_bounds, new_π )
+end
+
+function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) # This implements weak branching
+    i = branch.i
+    j = branch.j
+    root = find_root(node)
+    model = root.model
+    modes = ["Wii", "Wjj", "Wij"]
+    best_score = -Inf
+    best_mode = ""
+    for mode in modes
+        fake_branch = _make_fake_branch(branch, mode * "_up")
+        model = JuMP.Model(optimizer)
+        fake_branch.wii = JuMP.@variable(model, wii)
+        fake_branch.wjj = JuMP.@variable(model, wjj)
+        fake_branch.wr = JuMP.@variable(model, wr)
+        fake_branch.wi = JuMP.@variable(model, wi)
+        JuMP.@variable(model, λ)
+        JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
+        JuMP.@objective(model, Max, λ)
+        add_constraints_from_branch!(model, fake_branch)
+        optimize!(model)
+        λ_up = JuMP.value(λ)
+
+        fake_branch = _make_fake_branch(branch, mode * "_down")
+        model = JuMP.Model(optimizer)
+        fake_branch.wii = JuMP.@variable(model, wii)
+        fake_branch.wjj = JuMP.@variable(model, wjj)
+        fake_branch.wr = JuMP.@variable(model, wr)
+        fake_branch.wi = JuMP.@variable(model, wi)
+        JuMP.@variable(model, λ)
+        JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
+        JuMP.@objective(model, Max, λ)
+        add_constraints_from_branch!(model, fake_branch)
+        optimize!(model)
+        λ_down = JuMP.value(λ)
+
+        # compute score, update if better
+        μ = 0.15
+        score = μ * max(-λ_up, -λ_down) + (1-μ) * min(-λ_up, -λ_down)
+        if score > best_score
+            best_score = score
+            best_mode = mode
         end
-        new_bounds = (Lii, Uii, Ljj, Ujj, Lij, Uij)
-        new_π = compute_π(new_bounds)
-        return SpatialBCBranch(branch.i, branch.j, branch.wii, branch.wjj, branch.wr, branch.wi, nothing, 
-                                new_bounds, new_π )
     end
 
+    if best_mode == "Wii"
+        return (i,i)
+    elseif best_mode == "Wjj"
+        return (j,j)
+    else # "Wij"
+        return (i,j)
+    end
+end
+
+#=
+function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
     function compute_score(up_solution::Dict{String, <:Real}, down_solution::Dict{String, <:Real})::Float64
         μ = 0.15
         λmin_up = 0.5 * (up_solution["Wii"] - up_solution["Wjj"] - norm([up_solution["Wii"] - up_solution["Wjj"], 2 * up_solution["Wij"], 2 * up_solution["Tij"]]) )
         λmin_down = 0.5 * (down_solution["Wii"] - down_solution["Wjj"] - norm([down_solution["Wii"] - down_solution["Wjj"], 2 * down_solution["Wij"], 2 * down_solution["Tij"]]) )
         return μ * max(-λmin_up, -λmin_down) + (1-μ) * min(-λmin_up, -λmin_down)
     end
-
     i = branch.i
     j = branch.j
     root = find_root(node)
@@ -234,7 +287,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
         return (i,j)
     end
 end
-
+=#
 function backtracking!(model::JuMP.Model, node::BB.AbstractNode)
     node.auxiliary_data["prev_branch_crefs"] = ConstraintRef[]
     pnode = node
@@ -260,7 +313,7 @@ function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch
     push!(new_branches, JuMP.@constraint(model, Lii <= wii <= Uii))
     push!(new_branches, JuMP.@constraint(model, Ljj <= wjj <= Ujj))
     push!(new_branches, JuMP.@constraint(model, Lij * wr <= wi))
-    push!(new_branches, JuMP.@constraint(model, wi <= Uij * wi))
+    push!(new_branches, JuMP.@constraint(model, wi <= Uij * wr))
     push!(new_branches, JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ujj * wii + Uii * wjj - Uii * Ujj))
     push!(new_branches, JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ljj * wii + Lii * wjj - Lii * Ljj))
     return new_branches
@@ -278,7 +331,6 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     root = find_root(node)
     model = root.model
-    # print_model_to_file(model, "model_$(node.id)_before")
     if node.bound >= tree.best_incumbent
         delete_prev_branch_constr!(model, node)
         @info " Fathomed by bound"
@@ -322,15 +374,12 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         next_branch_down.mod_branch = down_mod_branch
         child_up = BB.create_child_node(node, next_branch_up)
         child_down = BB.create_child_node(node, next_branch_down)
-        # child_up.model = root.model
-        # child_down.model = root.model
         BB.push!(tree, child_up)
         BB.push!(tree, child_down)
     else
         delete_prev_branch_constr!(model, node)
         @info " Fathomed by solution status: $(node.solution_status)"
     end
-    # print_model_to_file(model, "model_$(node.id)_after")
 end
 
 # implement depth first rule
@@ -363,8 +412,6 @@ BB.apply_changes!(node::BB.JuMPNode) = nothing
 
 function BB.bound!(node::BB.JuMPNode)
     model = find_root(node).model
-    # print_model_to_file(model, node.id)
-    println(total_num_constraints(model))
     backtracking!(model, node)
     JuMP.optimize!(model)
     node.solution_status = JuMP.termination_status(model)
@@ -382,6 +429,7 @@ function BB.bound!(node::BB.JuMPNode)
         @warn "Unexpected node solution status: $(node.solution_status)"
         node.bound = -Inf
     end
+    delete_prev_branch_constr!(model, node)
 end
 
 function BB.heuristics!(node::BB.JuMPNode)
@@ -459,7 +507,7 @@ file = "/home/weiqizhang/.julia/dev/BranchAndBound/data/case5.m"
 data = parse_file(file)
 pm = instantiate_model(data, NodeWRMPowerModel, build_opf)
 optimizer = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
-# optimizer = optimizer_with_attributes(COSMO.Optimizer, "verbose" => false)
+ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
 set_optimizer(pm.model, optimizer)
 
 # collect data
@@ -476,5 +524,9 @@ node.auxiliary_data["Uii"] = Uii
 node.auxiliary_data["Lij"] = Lij
 node.auxiliary_data["Uij"] = Uij
 tree = BB.initialize_tree(node)
+
+# set incumbent
+ipopt_solution = run_opf(file, ACRPowerModel, ipopt_optimizer)
+tree.best_incumbent = ipopt_solution["objective"]
 
 BB.run(tree)

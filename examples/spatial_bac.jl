@@ -60,6 +60,19 @@ function create_sbc_branch(i::Int64, j::Int64, prev_node::BB.AbstractNode)
     return SpatialBCBranch(i, j, wii, wjj, wr, wi, nothing, bounds, πs)
 end
 
+# get rid of angle difference bounds
+# will include in other parts of code
+function PM.constraint_voltage_angle_difference(pm::AbstractWModels, n::Int, f_idx, angmin, angmax)
+    i, f_bus, t_bus = f_idx
+
+    w_fr = var(pm, n, :w, f_bus)
+    w_to = var(pm, n, :w, t_bus)
+    wr   = var(pm, n, :wr, (f_bus, t_bus))
+    wi   = var(pm, n, :wi, (f_bus, t_bus))
+
+    cut_complex_product_and_angle_difference(pm.model, w_fr, w_to, wr, wi, angmin, angmax)
+end
+
 # modified from PM.build_opf 
 # get rid of voltage angle difference constraints
 function PM.build_opf(pm::NodeWRMPowerModel)

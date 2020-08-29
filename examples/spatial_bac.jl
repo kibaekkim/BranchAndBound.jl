@@ -180,6 +180,18 @@ function find_branching_entry(branch::SpatialBCBranch, node::BB.AbstractNode)::T
 end
 
 function delete_prev_branch_constr!(model::JuMP.Model, node::BB.AbstractNode)
+    root = find_root(node)
+    pm = root.auxiliary_data["PM"]
+    w = var(pm, :w)
+    wr = var(pm, :wr)
+    for (i,_) in ref(pm, :bus)
+        JuMP.set_lower_bound(w[i], root.auxiliary_data["Lii"][i])
+        JuMP.set_upper_bound(w[i], root.auxiliary_data["Uii"][i])
+    end
+    for (pair,_) in ref(pm, :buspairs)
+        JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_lb"][pair], wr[pair], root.auxiliary_data["Lij"][pair])
+        JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_ub"][pair], wr[pair], root.auxiliary_data["Uij"][pair])
+    end
     while !isempty(node.auxiliary_data["prev_branch_crefs"])
         cref = Base.pop!(node.auxiliary_data["prev_branch_crefs"])
         delete(model, cref)
@@ -219,7 +231,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         JuMP.@variable(model, λ)
         JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
         JuMP.@objective(model, Max, λ)
-        add_constraints_from_branch!(model, fake_branch)
+        add_constraints_from_branch!(model, fake_branch, root)
         optimize!(model)
         λ_up = JuMP.value(λ)
 
@@ -232,7 +244,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         JuMP.@variable(model, λ)
         JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
         JuMP.@objective(model, Max, λ)
-        add_constraints_from_branch!(model, fake_branch)
+        add_constraints_from_branch!(model, fake_branch, root)
         optimize!(model)
         λ_down = JuMP.value(λ)
 
@@ -304,17 +316,23 @@ end
 =#
 function backtracking!(model::JuMP.Model, node::BB.AbstractNode)
     node.auxiliary_data["prev_branch_crefs"] = ConstraintRef[]
+    root = find_root(node)
     pnode = node
+    already_modified = []
     while !isnothing(pnode.parent)
-        crefs = add_constraints_from_branch!(model, pnode.branch)
-        for cref in crefs
-            push!(node.auxiliary_data["prev_branch_crefs"], cref)
+        (i,j) = (pnode.branch.i, pnode.branch.j)
+        if !((i,j) in already_modified)
+            crefs = add_constraints_from_branch!(model, pnode.branch, root)
+            for cref in crefs
+                push!(node.auxiliary_data["prev_branch_crefs"], cref)
+            end
+            push!(already_modified, (i,j))
         end
         pnode = pnode.parent
     end
 end
 
-function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch)::Vector{JuMP.ConstraintRef}
+function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch, root::BB.AbstractNode)::Vector{JuMP.ConstraintRef}
     i = branch.i
     j = branch.j
     (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
@@ -324,10 +342,12 @@ function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch
     wr = branch.wr
     wi = branch.wi
     new_branches = []
-    push!(new_branches, JuMP.@constraint(model, Lii <= wii <= Uii))
-    push!(new_branches, JuMP.@constraint(model, Ljj <= wjj <= Ujj))
-    push!(new_branches, JuMP.@constraint(model, Lij * wr <= wi))
-    push!(new_branches, JuMP.@constraint(model, wi <= Uij * wr))
+    JuMP.set_lower_bound(wii, Lii)
+    JuMP.set_upper_bound(wii, Uii)
+    JuMP.set_lower_bound(wjj, Ljj)
+    JuMP.set_upper_bound(wjj, Ujj)
+    JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_lb"][(i,j)], wr, Lij)
+    JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_ub"][(i,j)], wr, Uij)
     push!(new_branches, JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ujj * wii + Uii * wjj - Uii * Ujj))
     push!(new_branches, JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ljj * wii + Lii * wjj - Lii * Ljj))
     return new_branches

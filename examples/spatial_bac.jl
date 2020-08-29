@@ -539,6 +539,16 @@ function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNo
     node.auxiliary_data["Uii"] = Uii
     node.auxiliary_data["Lij"] = Lij
     node.auxiliary_data["Uij"] = Uij
+    node.auxiliary_data["Cuts"] = Dict( "angle_lb" => Dict() , "angle_ub" => Dict())
+    wr = var(pm, :wr)
+    wi = var(pm, :wi)
+    for (i, branch) in ref(pm, :branch)
+        f_bus = branch["f_bus"]
+        t_bus = branch["t_bus"]
+        node.auxiliary_data["Cuts"]["angle_lb"][(f_bus, t_bus)] = @constraint(pm.model, Lij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] <= wi[(f_bus, t_bus)])
+        node.auxiliary_data["Cuts"]["angle_ub"][(f_bus, t_bus)] = @constraint(pm.model, Uij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] >= wi[(f_bus, t_bus)])
+    end
+
     tree = BB.initialize_tree(node)
 
     # set incumbent

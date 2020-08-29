@@ -1,10 +1,10 @@
 using BranchAndBound, JuMP, PowerModels, DeNet
-using Mosek, MosekTools, Ipopt, COSMO, Gurobi
+using Mosek, MosekTools, Ipopt
 using LinearAlgebra
 const BB = BranchAndBound
 const PM = PowerModels
 
-
+const MOSEK_OPTIMIZER = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
 ###########################################################################
 #                  Data Structures with Helper Functions                  #
 ###########################################################################
@@ -47,10 +47,14 @@ end
 function create_sbc_branch(i::Int64, j::Int64, prev_node::BB.AbstractNode)
     root = find_root(prev_node)
     pm = root.auxiliary_data["PM"]
-    wii = var(pm, :WR)[i,i]
-    wjj = var(pm, :WR)[j,j]
-    wr = var(pm, :WR)[i,j]
-    wi = var(pm, :WI)[i,j]
+    bus_ids = ids(pm, :bus)
+    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
+    widx_i = lookup_w_index[i]
+    widx_j = lookup_w_index[j]
+    wii = var(pm, :WR)[widx_i,widx_i]
+    wjj = var(pm, :WR)[widx_j,widx_j]
+    wr = var(pm, :WR)[widx_i,widx_j]
+    wi = var(pm, :WI)[widx_i,widx_j]
     bounds = get_LU_from_branches(prev_node, i, j)
     πs = compute_π(bounds)
     return SpatialBCBranch(i, j, wii, wjj, wr, wi, nothing, bounds, πs)
@@ -76,7 +80,7 @@ function PM.build_opf(pm::NodeWRMPowerModel)
     for i in ids(pm, :branch)
         constraint_ohms_yt_from(pm, i)
         constraint_ohms_yt_to(pm, i)
-
+        constraint_voltage_angle_difference(pm, i)
         constraint_thermal_limit_from(pm, i)
         constraint_thermal_limit_to(pm, i)
     end
@@ -84,13 +88,6 @@ function PM.build_opf(pm::NodeWRMPowerModel)
     for i in ids(pm, :dcline)
         constraint_dcline_power_losses(pm, i)
     end
-
-    # wr = var(pm, :WR)
-    # for x in wr
-    #     if !JuMP.has_lower_bound(x) || JuMP.lower_bound(x) < 0
-    #         @constraint(pm.model, x >= 0)
-    #     end
-    # end
 end
 
 function find_root(node::BB.AbstractNode)::BB.AbstractNode
@@ -103,15 +100,19 @@ end
 
 function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     pm = find_root(node).auxiliary_data["PM"]
+    bus_ids = ids(pm, :bus)
+    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
     wr = var(pm, :WR)
     wi = var(pm, :WI)
     max_lambda = -Inf
     max_id = ()
     node_solution = node.solution
-    for ((i,j),_) in ref(pm, :buspairs)
+    for ((raw_i,raw_j),_) in ref(pm, :buspairs)
+        i = lookup_w_index[raw_i]
+        j = lookup_w_index[raw_j]
         lambda = 0.5 * (node_solution[wr[i,i]] - node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
         if lambda > max_lambda
-            max_id = (i,j)
+            max_id = (raw_i,raw_j)
             max_lambda = lambda
         end
     end
@@ -197,7 +198,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
     best_mode = ""
     for mode in modes
         fake_branch = _make_fake_branch(branch, mode * "_up")
-        model = JuMP.Model(optimizer)
+        model = JuMP.Model(MOSEK_OPTIMIZER)
         fake_branch.wii = JuMP.@variable(model, wii)
         fake_branch.wjj = JuMP.@variable(model, wjj)
         fake_branch.wr = JuMP.@variable(model, wr)
@@ -210,7 +211,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         λ_up = JuMP.value(λ)
 
         fake_branch = _make_fake_branch(branch, mode * "_down")
-        model = JuMP.Model(optimizer)
+        model = JuMP.Model(MOSEK_OPTIMIZER)
         fake_branch.wii = JuMP.@variable(model, wii)
         fake_branch.wjj = JuMP.@variable(model, wjj)
         fake_branch.wr = JuMP.@variable(model, wr)
@@ -332,39 +333,51 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     root = find_root(node)
     model = root.model
     if node.bound >= tree.best_incumbent
+        if isapprox(node.bound, tree.best_incumbent, atol = 3)
+            root.auxiliary_data["best_bound"] = node.bound
+            root.auxiliary_data["best_id"] = node.id
+        end
         delete_prev_branch_constr!(model, node)
-        @info " Fathomed by bound"
-    elseif node.depth >= 25
+        # @info " Fathomed by bound"
+    elseif node.depth >= 10
         delete_prev_branch_constr!(model, node)
-        @info " Fathomed by maximum depth"
+        # @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
+        if node.bound > root.auxiliary_data["best_bound"]
+            root.auxiliary_data["best_bound"] = node.bound
+            root.auxiliary_data["best_id"] = node.id
+        end
         pm = root.auxiliary_data["PM"]
         (i,j) = find_min_eigen(node)
         new_sbc_branch = create_sbc_branch(i, j, node)
         (new_i,new_j) = find_branching_entry(new_sbc_branch, node) # This function implements MVSB/MVWB/RBEB
         up_bounds_arr = [k for k in new_sbc_branch.bounds]
         down_bounds_arr = [k for k in new_sbc_branch.bounds]
+        bus_ids = ids(pm, :bus)
+        lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
+        widx_new_i = lookup_w_index[new_i]
+        widx_new_j = lookup_w_index[new_j]
         if new_i != new_j # branch on Wij
             up_bounds_arr[5] = (up_bounds_arr[5] + up_bounds_arr[6]) / 2
             down_bounds_arr[6] = (down_bounds_arr[5] + down_bounds_arr[6]) / 2
-            vpair = (PM.var(pm, :WR)[new_i,new_j], PM.var(pm, :WI)[i,j])
+            vpair = (PM.var(pm, :WR)[widx_new_i,widx_new_j], PM.var(pm, :WI)[widx_new_i,widx_new_j])
             up_mod_branch = ComplexVariableBranch(Dict(vpair => up_bounds_arr[5]), Dict(vpair => up_bounds_arr[6]))
             down_mod_branch = ComplexVariableBranch(Dict(vpair => down_bounds_arr[5]), Dict(vpair => down_bounds_arr[6]))
-            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[5]),$(up_bounds_arr[5]),$(up_bounds_arr[6])]."
+            # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[5]),$(up_bounds_arr[5]),$(up_bounds_arr[6])]."
         elseif new_i == i # branch on Wii
             up_bounds_arr[1] = (up_bounds_arr[1] + up_bounds_arr[2]) / 2
             down_bounds_arr[2] = (down_bounds_arr[1] + down_bounds_arr[2]) / 2
-            v = PM.var(pm, :WR)[new_i, new_j]
+            v = PM.var(pm, :WR)[widx_new_i, widx_new_j]
             up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[1]), Dict(v => up_bounds_arr[2]))
             down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[1]), Dict(v => down_bounds_arr[2]))
-            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[1]),$(up_bounds_arr[1]),$(up_bounds_arr[2])]."
+            # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[1]),$(up_bounds_arr[1]),$(up_bounds_arr[2])]."
         else # branch on Wjj
             up_bounds_arr[3] = (up_bounds_arr[3] + up_bounds_arr[4]) / 2
             down_bounds_arr[4] = (down_bounds_arr[3] + down_bounds_arr[4]) / 2
-            v = PM.var(pm, :WR)[new_i, new_j]
+            v = PM.var(pm, :WR)[widx_new_i, widx_new_j]
             up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[3]), Dict(v => up_bounds_arr[4]))
             down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[3]), Dict(v => down_bounds_arr[4]))
-            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[3]),$(up_bounds_arr[3]),$(up_bounds_arr[4])]."
+            # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[3]),$(up_bounds_arr[3]),$(up_bounds_arr[4])]."
         end
         next_branch_up = branch_copy(new_sbc_branch)
         next_branch_down = new_sbc_branch
@@ -378,7 +391,7 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         BB.push!(tree, child_down)
     else
         delete_prev_branch_constr!(model, node)
-        @info " Fathomed by solution status: $(node.solution_status)"
+        # @info " Fathomed by solution status: $(node.solution_status)"
     end
 end
 
@@ -394,11 +407,11 @@ end
 function BB.termination(tree::BB.AbstractTree)
     @info "Tree nodes: processed $(length(tree.processed)), left $(length(tree.nodes)), total $(tree.node_counter), best bound $(tree.best_bound), best incumbent $(tree.best_incumbent)"
     if BB.isempty(tree)
-        @info "Completed the tree search"
+        # @info "Completed the tree search"
         return true
     end
-    if length(tree.processed) >= 10000
-        @info "Reached node limit"
+    if length(tree.processed) >= 1000
+        # @info "Reached node limit"
         return true
     end
     return false
@@ -496,37 +509,3 @@ function print_model_to_file(model::JuMP.Model, id::String)
     print(f, model)
     close(f)
 end
-
-###########################################################################
-#                                Main Code                                #
-###########################################################################
-
-# read data, and formulate root model using PowerModels
-file = "/home/weiqizhang/.julia/dev/BranchAndBound/data/case5.m"
-# file = "/home/weiqizhang/anl/pglib-opf/api/pglib_opf_case24_ieee_rts__api.m"
-data = parse_file(file)
-pm = instantiate_model(data, NodeWRMPowerModel, build_opf)
-optimizer = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
-ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
-set_optimizer(pm.model, optimizer)
-
-# collect data
-Lii = Dict(i => bus["vmin"]^2 for (i, bus) in ref(pm, :bus))
-Uii = Dict(i => bus["vmax"]^2 for (i, bus) in ref(pm, :bus))
-Lij = Dict((i,j) => tan(branch["angmin"]) for ((i,j), branch) in ref(pm, :buspairs))
-Uij = Dict((i,j) => tan(branch["angmax"]) for ((i,j), branch) in ref(pm, :buspairs))
-
-# initialize branch-and-cut tree
-node = BB.JuMPNode{SpatialBCBranch}(pm.model)
-node.auxiliary_data["PM"] = pm
-node.auxiliary_data["Lii"] = Lii
-node.auxiliary_data["Uii"] = Uii
-node.auxiliary_data["Lij"] = Lij
-node.auxiliary_data["Uij"] = Uij
-tree = BB.initialize_tree(node)
-
-# set incumbent
-ipopt_solution = run_opf(file, ACRPowerModel, ipopt_optimizer)
-tree.best_incumbent = ipopt_solution["objective"]
-
-BB.run(tree)

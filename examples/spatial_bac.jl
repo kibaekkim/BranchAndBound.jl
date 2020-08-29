@@ -522,3 +522,29 @@ function print_model_to_file(model::JuMP.Model, id::String)
     print(f, model)
     close(f)
 end
+
+function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNode}
+    # collect data
+    Lii = Dict(i => bus["vmin"]^2 for (i, bus) in ref(pm, :bus))
+    Uii = Dict(i => bus["vmax"]^2 for (i, bus) in ref(pm, :bus))
+    Lij = Dict((i,j) => tan(branch["angmin"]) for ((i,j), branch) in ref(pm, :buspairs))
+    Uij = Dict((i,j) => tan(branch["angmax"]) for ((i,j), branch) in ref(pm, :buspairs))
+
+    # initialize branch-and-cut tree
+    node = BB.JuMPNode{SpatialBCBranch}(pm.model)
+    node.auxiliary_data["best_id"] = 0
+    node.auxiliary_data["best_bound"] = -Inf
+    node.auxiliary_data["PM"] = pm
+    node.auxiliary_data["Lii"] = Lii
+    node.auxiliary_data["Uii"] = Uii
+    node.auxiliary_data["Lij"] = Lij
+    node.auxiliary_data["Uij"] = Uij
+    tree = BB.initialize_tree(node)
+
+    # set incumbent
+    ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
+    ipopt_solution = run_opf(file, ACRPowerModel, ipopt_optimizer)
+    tree.best_incumbent = ipopt_solution["objective"]
+
+    return tree, node
+end

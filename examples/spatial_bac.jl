@@ -213,11 +213,30 @@ function _make_fake_branch(branch::SpatialBCBranch, mode::String)
                             new_bounds, new_π )
 end
 
+function add_constraints_from_fake_branch!(model::JuMP.Model, branch::SpatialBCBranch, root::BB.AbstractNode)
+    i = branch.i
+    j = branch.j
+    (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
+    πs = branch.valid_ineq_coeffs
+    wii = branch.wii
+    wjj = branch.wjj
+    wr = branch.wr
+    wi = branch.wi
+    new_branches = []
+    JuMP.set_lower_bound(wii, Lii)
+    JuMP.set_upper_bound(wii, Uii)
+    JuMP.set_lower_bound(wjj, Ljj)
+    JuMP.set_upper_bound(wjj, Ujj)
+    JuMP.@constraint(model, Lij * wr <= wi)
+    JuMP.@constraint(model, Uij * wr >= wi)
+    JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ujj * wii + Uii * wjj - Uii * Ujj)
+    JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ljj * wii + Lii * wjj - Lii * Ljj)
+end
+
 function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) # This implements weak branching
     i = branch.i
     j = branch.j
     root = find_root(node)
-    model = root.model
     modes = ["Wii", "Wjj", "Wij"]
     best_score = -Inf
     best_mode = ""
@@ -231,7 +250,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         JuMP.@variable(model, λ)
         JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
         JuMP.@objective(model, Max, λ)
-        add_constraints_from_branch!(model, fake_branch, root)
+        add_constraints_from_fake_branch!(model, fake_branch, root)
         optimize!(model)
         λ_up = JuMP.value(λ)
 
@@ -244,7 +263,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         JuMP.@variable(model, λ)
         JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
         JuMP.@objective(model, Max, λ)
-        add_constraints_from_branch!(model, fake_branch, root)
+        add_constraints_from_fake_branch!(model, fake_branch, root)
         optimize!(model)
         λ_down = JuMP.value(λ)
 
@@ -346,8 +365,16 @@ function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch
     JuMP.set_upper_bound(wii, Uii)
     JuMP.set_lower_bound(wjj, Ljj)
     JuMP.set_upper_bound(wjj, Ujj)
+    # println("============== Before Setting ===============")
+    # println(root.auxiliary_data["Cuts"]["angle_lb"])
+    # println(root.auxiliary_data["Cuts"]["angle_ub"])
+    # println("i: $(i), j: $(j), wr: $(JuMP.name(wr))")
     JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_lb"][(i,j)], wr, Lij)
     JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_ub"][(i,j)], wr, Uij)
+    # println("============== After Setting ===============")
+    # println(root.auxiliary_data["Cuts"]["angle_lb"])
+    # println(root.auxiliary_data["Cuts"]["angle_ub"])
+    # println("============== End Setting ===============")
     push!(new_branches, JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ujj * wii + Uii * wjj - Uii * Ujj))
     push!(new_branches, JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ljj * wii + Lii * wjj - Lii * Ljj))
     return new_branches
@@ -371,10 +398,10 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             root.auxiliary_data["best_id"] = node.id
         end
         delete_prev_branch_constr!(model, node)
-        # @info " Fathomed by bound"
+        @info " Fathomed by bound"
     elseif node.depth >= 10
         delete_prev_branch_constr!(model, node)
-        # @info " Fathomed by maximum depth"
+        @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
         if node.bound > root.auxiliary_data["best_bound"]
             root.auxiliary_data["best_bound"] = node.bound
@@ -396,21 +423,21 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             vpair = (PM.var(pm, :WR)[widx_new_i,widx_new_j], PM.var(pm, :WI)[widx_new_i,widx_new_j])
             up_mod_branch = ComplexVariableBranch(Dict(vpair => up_bounds_arr[5]), Dict(vpair => up_bounds_arr[6]))
             down_mod_branch = ComplexVariableBranch(Dict(vpair => down_bounds_arr[5]), Dict(vpair => down_bounds_arr[6]))
-            # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[5]),$(up_bounds_arr[5]),$(up_bounds_arr[6])]."
+            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[5]),$(up_bounds_arr[5]),$(up_bounds_arr[6])]."
         elseif new_i == i # branch on Wii
             up_bounds_arr[1] = (up_bounds_arr[1] + up_bounds_arr[2]) / 2
             down_bounds_arr[2] = (down_bounds_arr[1] + down_bounds_arr[2]) / 2
             v = PM.var(pm, :WR)[widx_new_i, widx_new_j]
             up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[1]), Dict(v => up_bounds_arr[2]))
             down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[1]), Dict(v => down_bounds_arr[2]))
-            # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[1]),$(up_bounds_arr[1]),$(up_bounds_arr[2])]."
+            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[1]),$(up_bounds_arr[1]),$(up_bounds_arr[2])]."
         else # branch on Wjj
             up_bounds_arr[3] = (up_bounds_arr[3] + up_bounds_arr[4]) / 2
             down_bounds_arr[4] = (down_bounds_arr[3] + down_bounds_arr[4]) / 2
             v = PM.var(pm, :WR)[widx_new_i, widx_new_j]
             up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[3]), Dict(v => up_bounds_arr[4]))
             down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[3]), Dict(v => down_bounds_arr[4]))
-            # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[3]),$(up_bounds_arr[3]),$(up_bounds_arr[4])]."
+            @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[3]),$(up_bounds_arr[3]),$(up_bounds_arr[4])]."
         end
         next_branch_up = branch_copy(new_sbc_branch)
         next_branch_down = new_sbc_branch
@@ -424,7 +451,7 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         BB.push!(tree, child_down)
     else
         delete_prev_branch_constr!(model, node)
-        # @info " Fathomed by solution status: $(node.solution_status)"
+        @info " Fathomed by solution status: $(node.solution_status)"
     end
 end
 

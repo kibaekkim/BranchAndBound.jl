@@ -1,3 +1,5 @@
+# This code is used to print out branching decisions for debugging purposes
+
 # include("./spatial_bac.jl")
 
 function analyze_tree_bounds(tree::BB.AbstractTree)

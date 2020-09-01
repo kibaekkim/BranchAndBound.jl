@@ -5,17 +5,22 @@ const BB = BranchAndBound
 const PM = PowerModels
 
 const MOSEK_OPTIMIZER = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
+const MAX_NODE_ALLOWED = 1000
+
 ###########################################################################
-#                  Data Structures with Helper Functions                  #
+#                             Data Structures                             #
 ###########################################################################
 
+# A new type specifically for spatial branch and bound, essentially SDPWRMPowerModel
 mutable struct NodeWRMPowerModel <: AbstractWRMModel @pm_fields end
 
+# A new branch type, mapping (Wij, Tij) to their lower and upper bounds
 mutable struct ComplexVariableBranch <: BB.AbstractBranch
     lb::Dict{Tuple{JuMP.VariableRef, JuMP.VariableRef},Real} # Lij
     ub::Dict{Tuple{JuMP.VariableRef, JuMP.VariableRef},Real} # Uij
 end
 
+# This computes coefficients for cuts (3a), (3b) in the paper
 function compute_π(bounds::NTuple{6, <:Real})::NTuple{5, <:Real}
     function sigmoid(x::Real)::Real
         x == 0 ? res = 0 : res = (sqrt(1 + x^2) - 1) / x
@@ -30,6 +35,8 @@ function compute_π(bounds::NTuple{6, <:Real})::NTuple{5, <:Real}
     return (π0, π1, π2, π3, π4)
 end
 
+# This is the main branch type used in our implementation
+# (i,j) should always be one of the lines in the power system
 mutable struct SpatialBCBranch <: BB.AbstractBranch
     i::Int
     j::Int
@@ -37,13 +44,12 @@ mutable struct SpatialBCBranch <: BB.AbstractBranch
     wjj::JuMP.VariableRef
     wr::JuMP.VariableRef
     wi::JuMP.VariableRef
-    mod_branch::Union{Nothing, ComplexVariableBranch, BB.VariableBranch} # this capture either a changed bound for Wij and Tij, or a changed bound for Wii/Wjj 
+    mod_branch::Union{Nothing, ComplexVariableBranch, BB.VariableBranch} # this captures either a changed bound for Wij and Tij, or a changed bound for Wii/Wjj 
     bounds::NTuple{6, <:Real} # Lii, Uii, Ljj, Ujj, Lij, Uij
     valid_ineq_coeffs::NTuple{5, <:Real} # π coefficients
 end
 
-# create a SpatialBCBranch, in which mod_branch is Nothing (the exact matrix entry to branch is not decided yet)
-# (maybe don't need this... instead decide the branching entry first...)
+# create a SpatialBCBranch, in which mod_branch is nothing (because the exact matrix entry to branch is not decided yet)
 function create_sbc_branch(i::Int64, j::Int64, prev_node::BB.AbstractNode)
     root = find_root(prev_node)
     pm = root.auxiliary_data["PM"]
@@ -60,78 +66,7 @@ function create_sbc_branch(i::Int64, j::Int64, prev_node::BB.AbstractNode)
     return SpatialBCBranch(i, j, wii, wjj, wr, wi, nothing, bounds, πs)
 end
 
-# get rid of angle difference bounds
-# will include in other parts of code
-function PM.constraint_voltage_angle_difference(pm::AbstractWModels, n::Int, f_idx, angmin, angmax)
-    i, f_bus, t_bus = f_idx
-
-    w_fr = var(pm, n, :w, f_bus)
-    w_to = var(pm, n, :w, t_bus)
-    wr   = var(pm, n, :wr, (f_bus, t_bus))
-    wi   = var(pm, n, :wi, (f_bus, t_bus))
-
-    cut_complex_product_and_angle_difference(pm.model, w_fr, w_to, wr, wi, angmin, angmax)
-end
-
-# modified from PM.build_opf 
-# get rid of voltage angle difference constraints
-function PM.build_opf(pm::NodeWRMPowerModel)
-    variable_bus_voltage(pm)
-    variable_gen_power(pm)
-    variable_branch_power(pm)
-    variable_dcline_power(pm)
-
-    DeNet.objective_min_fuel_and_flow_cost_mod(pm)
-
-    constraint_model_voltage(pm)
-
-    :cut_bus in keys(ref(pm)) ? cut_bus = ids(pm, :cut_bus) : cut_bus = []
-    for i in setdiff(ids(pm, :bus), cut_bus)
-        constraint_power_balance(pm, i)
-    end
-
-    for i in ids(pm, :branch)
-        constraint_ohms_yt_from(pm, i)
-        constraint_ohms_yt_to(pm, i)
-        constraint_voltage_angle_difference(pm, i)
-        constraint_thermal_limit_from(pm, i)
-        constraint_thermal_limit_to(pm, i)
-    end
-
-    for i in ids(pm, :dcline)
-        constraint_dcline_power_losses(pm, i)
-    end
-end
-
-function find_root(node::BB.AbstractNode)::BB.AbstractNode
-    pnode = node
-    while !isnothing(pnode.parent)
-        pnode = pnode.parent
-    end
-    return pnode
-end
-
-function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
-    pm = find_root(node).auxiliary_data["PM"]
-    bus_ids = ids(pm, :bus)
-    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
-    wr = var(pm, :WR)
-    wi = var(pm, :WI)
-    max_lambda = -Inf
-    max_id = ()
-    node_solution = node.solution
-    for ((raw_i,raw_j),_) in ref(pm, :buspairs)
-        i = lookup_w_index[raw_i]
-        j = lookup_w_index[raw_j]
-        lambda = 0.5 * (node_solution[wr[i,i]] - node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
-        if lambda > max_lambda
-            max_id = (raw_i,raw_j)
-            max_lambda = lambda
-        end
-    end
-    return max_id
-end
-
+# This function tracks the branches and update the bounds for selected entries (i,j)
 function get_LU_from_branches(node::BB.AbstractNode, i::Int64, j::Int64)::NTuple{6, <:Real}
     pnode = node
     LU = [NaN for i in 1:6]
@@ -166,12 +101,93 @@ function get_LU_from_branches(node::BB.AbstractNode, i::Int64, j::Int64)::NTuple
 
     return Tuple(LU)
 end
+###########################################################################
+#                          PowerModels Extensions                         #
+###########################################################################
 
+# get rid of angle difference bounds, which will be included in other parts of code
+# the valid inequality cuts for voltage products are still kept
+function PM.constraint_voltage_angle_difference(pm::AbstractWModels, n::Int, f_idx, angmin, angmax)
+    i, f_bus, t_bus = f_idx
 
-# this function creates the 6 possible node candidates right after the new branch
-# needed for MVSB, where we need to solve the problems of all 6 node candidates
-# here the branch is the new branch next to the node
-# This encodes one of MVSB/MVWB/RBEB
+    w_fr = var(pm, n, :w, f_bus)
+    w_to = var(pm, n, :w, t_bus)
+    wr   = var(pm, n, :wr, (f_bus, t_bus))
+    wi   = var(pm, n, :wi, (f_bus, t_bus))
+
+    cut_complex_product_and_angle_difference(pm.model, w_fr, w_to, wr, wi, angmin, angmax)
+end
+
+# This is essentially copied from original PM.build_opf 
+function PM.build_opf(pm::NodeWRMPowerModel)
+    variable_bus_voltage(pm)
+    variable_gen_power(pm)
+    variable_branch_power(pm)
+    variable_dcline_power(pm)
+
+    DeNet.objective_min_fuel_and_flow_cost_mod(pm)
+
+    constraint_model_voltage(pm)
+
+    :cut_bus in keys(ref(pm)) ? cut_bus = ids(pm, :cut_bus) : cut_bus = [] # This is needed in order to be compatible with network decomposition later
+    for i in setdiff(ids(pm, :bus), cut_bus)
+        constraint_power_balance(pm, i)
+    end
+
+    for i in ids(pm, :branch)
+        constraint_ohms_yt_from(pm, i)
+        constraint_ohms_yt_to(pm, i)
+        constraint_voltage_angle_difference(pm, i)
+        constraint_thermal_limit_from(pm, i)
+        constraint_thermal_limit_to(pm, i)
+    end
+
+    for i in ids(pm, :dcline)
+        constraint_dcline_power_losses(pm, i)
+    end
+end
+
+###########################################################################
+#                            Helper Functions                             #
+###########################################################################
+
+# This finds the root of the tree from any node in the tree
+function find_root(node::BB.AbstractNode)::BB.AbstractNode
+    pnode = node
+    while !isnothing(pnode.parent)
+        pnode = pnode.parent
+    end
+    return pnode
+end
+
+###########################################################################
+#                        Key Steps Implementation                         #
+###########################################################################
+
+# This function finds the line index (i,j) that the corresponding 2-by-2 W matrix attains the maximum λmin
+# (This seems buggy for now becuase the max_lambda obtained is negative...)
+function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
+    pm = find_root(node).auxiliary_data["PM"]
+    bus_ids = ids(pm, :bus)
+    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
+    wr = var(pm, :WR)
+    wi = var(pm, :WI)
+    max_lambda = -Inf
+    max_id = ()
+    node_solution = node.solution
+    for ((raw_i,raw_j),_) in ref(pm, :buspairs)
+        i = lookup_w_index[raw_i]
+        j = lookup_w_index[raw_j]
+        lambda = 0.5 * (node_solution[wr[i,i]] - node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
+        if lambda > max_lambda
+            max_id = (raw_i,raw_j)
+            max_lambda = lambda
+        end
+    end
+    return max_id
+end
+
+# this is the interface for finding the complex entry to branch
 function find_branching_entry(branch::SpatialBCBranch, node::BB.AbstractNode)::Tuple{Int64, Int64}
     root = find_root(node)
     model = root.model
@@ -179,61 +195,42 @@ function find_branching_entry(branch::SpatialBCBranch, node::BB.AbstractNode)::T
     return opt_idx
 end
 
-function delete_prev_branch_constr!(model::JuMP.Model, node::BB.AbstractNode)
-    root = find_root(node)
-    pm = root.auxiliary_data["PM"]
-    w = var(pm, :w)
-    wr = var(pm, :wr)
-    for (i,_) in ref(pm, :bus)
-        JuMP.set_lower_bound(w[i], root.auxiliary_data["Lii"][i])
-        JuMP.set_upper_bound(w[i], root.auxiliary_data["Uii"][i])
+# this implements weak branching to find the best, and returns the index of the complex entry to branch on
+function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
+    function _make_fake_branch(branch::SpatialBCBranch, mode::String)
+        (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
+        if mode == "Wii_up" Lii = (Lii + Uii) / 2
+        elseif mode == "Wii_down" Uii = (Lii + Uii) / 2
+        elseif mode == "Wjj_up" Ljj = (Ljj + Ujj) / 2
+        elseif mode == "Wjj_down" Ujj = (Ljj + Ujj) / 2
+        elseif mode == "Wij_up" Lij = (Lij + Uij) / 2
+        elseif mode == "Wij_down" Uij = (Lij + Uij) / 2
+        end
+        new_bounds = (Lii, Uii, Ljj, Ujj, Lij, Uij)
+        new_π = compute_π(new_bounds)
+        return SpatialBCBranch(branch.i, branch.j, branch.wii, branch.wjj, branch.wr, branch.wi, nothing, 
+                                new_bounds, new_π )
     end
-    for (pair,_) in ref(pm, :buspairs)
-        JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_lb"][pair], wr[pair], root.auxiliary_data["Lij"][pair])
-        JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_ub"][pair], wr[pair], root.auxiliary_data["Uij"][pair])
-    end
-    while !isempty(node.auxiliary_data["prev_branch_crefs"])
-        cref = Base.pop!(node.auxiliary_data["prev_branch_crefs"])
-        delete(model, cref)
-    end
-end
-
-function _make_fake_branch(branch::SpatialBCBranch, mode::String)
-    (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
-    if mode == "Wii_up" Lii = (Lii + Uii) / 2
-    elseif mode == "Wii_down" Uii = (Lii + Uii) / 2
-    elseif mode == "Wjj_up" Ljj = (Ljj + Ujj) / 2
-    elseif mode == "Wjj_down" Ujj = (Ljj + Ujj) / 2
-    elseif mode == "Wij_up" Lij = (Lij + Uij) / 2
-    elseif mode == "Wij_down" Uij = (Lij + Uij) / 2
-    end
-    new_bounds = (Lii, Uii, Ljj, Ujj, Lij, Uij)
-    new_π = compute_π(new_bounds)
-    return SpatialBCBranch(branch.i, branch.j, branch.wii, branch.wjj, branch.wr, branch.wi, nothing, 
-                            new_bounds, new_π )
-end
-
-function add_constraints_from_fake_branch!(model::JuMP.Model, branch::SpatialBCBranch, root::BB.AbstractNode)
-    i = branch.i
-    j = branch.j
-    (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
-    πs = branch.valid_ineq_coeffs
-    wii = branch.wii
-    wjj = branch.wjj
-    wr = branch.wr
-    wi = branch.wi
-    new_branches = []
-    JuMP.set_lower_bound(wii, Lii)
-    JuMP.set_upper_bound(wii, Uii)
-    JuMP.set_lower_bound(wjj, Ljj)
-    JuMP.set_upper_bound(wjj, Ujj)
-    JuMP.@constraint(model, Lij * wr <= wi)
-    JuMP.@constraint(model, Uij * wr >= wi)
-    JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ujj * wii + Uii * wjj - Uii * Ujj)
-    JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ljj * wii + Lii * wjj - Lii * Ljj)
-end
-
-function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) # This implements weak branching
+    
+    function _add_constraints_from_fake_branch!(model::JuMP.Model, branch::SpatialBCBranch)
+        i = branch.i
+        j = branch.j
+        (Lii, Uii, Ljj, Ujj, Lij, Uij) = branch.bounds
+        πs = branch.valid_ineq_coeffs
+        wii = branch.wii
+        wjj = branch.wjj
+        wr = branch.wr
+        wi = branch.wi
+        new_branches = []
+        JuMP.set_lower_bound(wii, Lii)
+        JuMP.set_upper_bound(wii, Uii)
+        JuMP.set_lower_bound(wjj, Ljj)
+        JuMP.set_upper_bound(wjj, Ujj)
+        JuMP.@constraint(model, Lij * wr <= wi)
+        JuMP.@constraint(model, Uij * wr >= wi)
+        JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ujj * wii + Uii * wjj - Uii * Ujj)
+        JuMP.@constraint(model, πs[1] + πs[2] * wii + πs[3] * wjj + πs[4] * wr + πs[5] * wi >= Ljj * wii + Lii * wjj - Lii * Ljj)
+    end    
     i = branch.i
     j = branch.j
     root = find_root(node)
@@ -250,7 +247,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         JuMP.@variable(model, λ)
         JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
         JuMP.@objective(model, Max, λ)
-        add_constraints_from_fake_branch!(model, fake_branch, root)
+        _add_constraints_from_fake_branch!(model, fake_branch)
         optimize!(model)
         λ_up = JuMP.value(λ)
 
@@ -263,7 +260,7 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
         JuMP.@variable(model, λ)
         JuMP.@constraint(model, [wii + wjj - 2 * λ, wii - wjj, 2 * wr, 2 * wi] in SecondOrderCone())
         JuMP.@objective(model, Max, λ)
-        add_constraints_from_fake_branch!(model, fake_branch, root)
+        _add_constraints_from_fake_branch!(model, fake_branch)
         optimize!(model)
         λ_down = JuMP.value(λ)
 
@@ -286,6 +283,8 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode) #
 end
 
 #=
+# This implements strong branching, might be outdated
+
 function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
     function compute_score(up_solution::Dict{String, <:Real}, down_solution::Dict{String, <:Real})::Float64
         μ = 0.15
@@ -333,6 +332,9 @@ function solve_candidate_nodes(branch::SpatialBCBranch, node::BB.AbstractNode)
     end
 end
 =#
+
+# this tracks all the branches above node and add constraints to model accordingly
+# if there are multiple branches on the same complex entry, only add constraints for the one with largest depth (closest to node)
 function backtracking!(model::JuMP.Model, node::BB.AbstractNode)
     node.auxiliary_data["prev_branch_crefs"] = ConstraintRef[]
     root = find_root(node)
@@ -351,6 +353,7 @@ function backtracking!(model::JuMP.Model, node::BB.AbstractNode)
     end
 end
 
+# this modifies constraints in model based on branch
 function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch, root::BB.AbstractNode)::Vector{JuMP.ConstraintRef}
     i = branch.i
     j = branch.j
@@ -380,8 +383,33 @@ function add_constraints_from_branch!(model::JuMP.Model, branch::SpatialBCBranch
     return new_branches
 end
 
-# return a deepcopy of SpatialBCBranch for everything except for model
-# this is needed to ensure variable references are not deepcopied
+# this resets constraints (2) and deletes constraints (3) in model
+function delete_prev_branch_constr!(model::JuMP.Model, node::BB.AbstractNode)
+    root = find_root(node)
+    pm = root.auxiliary_data["PM"]
+    w = var(pm, :w)
+    wr = var(pm, :wr)
+    for (i,_) in ref(pm, :bus)
+        JuMP.set_lower_bound(w[i], root.auxiliary_data["Lii"][i])
+        JuMP.set_upper_bound(w[i], root.auxiliary_data["Uii"][i])
+    end
+    for (pair,_) in ref(pm, :buspairs)
+        JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_lb"][pair], wr[pair], root.auxiliary_data["Lij"][pair])
+        JuMP.set_normalized_coefficient(root.auxiliary_data["Cuts"]["angle_ub"][pair], wr[pair], root.auxiliary_data["Uij"][pair])
+    end
+    while !isempty(node.auxiliary_data["prev_branch_crefs"])
+        cref = Base.pop!(node.auxiliary_data["prev_branch_crefs"])
+        delete(model, cref)
+    end
+end
+
+###########################################################################
+#                 Extensions of BranchAndBound Functions                  #
+#                   General Algorithm Flow Goes here                      #
+###########################################################################
+
+# return a "deepcopy" of SpatialBCBranch for everything except for variable references
+# this is needed to ensure variable references in new branch copy are still valid
 # the mod_branch will not be duplicated here if it is not nothing
 function branch_copy(branch::SpatialBCBranch)
     return SpatialBCBranch(branch.i, branch.j, branch.wii, branch.wjj, branch.wr, branch.wi, 
@@ -403,14 +431,19 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         delete_prev_branch_constr!(model, node)
         @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
+        # update the node with best bound (including processed ones), recorded in root
         if node.bound > root.auxiliary_data["best_bound"]
             root.auxiliary_data["best_bound"] = node.bound
             root.auxiliary_data["best_id"] = node.id
         end
+
+        # determine the complex entry to branch on based on solution
         pm = root.auxiliary_data["PM"]
         (i,j) = find_min_eigen(node)
         new_sbc_branch = create_sbc_branch(i, j, node)
-        (new_i,new_j) = find_branching_entry(new_sbc_branch, node) # This function implements MVSB/MVWB/RBEB
+        (new_i,new_j) = find_branching_entry(new_sbc_branch, node)
+
+        # create branches and child nodes accordingly
         up_bounds_arr = [k for k in new_sbc_branch.bounds]
         down_bounds_arr = [k for k in new_sbc_branch.bounds]
         bus_ids = ids(pm, :bus)
@@ -457,7 +490,7 @@ end
 
 # implement depth first rule
 function BB.next_node(tree::BB.AbstractTree)
-    # best bound
+    # sort! is redefined to find the node with maximum depth (consistent with the paper's implementation)
     sort!(tree::BB.AbstractTree) = Base.sort!(tree.nodes, by=x->x.depth)
     BB.sort!(tree)
     node = Base.pop!(tree.nodes)
@@ -470,7 +503,7 @@ function BB.termination(tree::BB.AbstractTree)
         # @info "Completed the tree search"
         return true
     end
-    if length(tree.processed) >= 1000
+    if length(tree.processed) >= MAX_NODE_ALLOWED
         # @info "Reached node limit"
         return true
     end
@@ -505,8 +538,11 @@ function BB.bound!(node::BB.JuMPNode)
     delete_prev_branch_constr!(model, node)
 end
 
+#=
+# This is supposed to find an incumbent for each node, by converting SDP problem into rank-1 form and solving with Ipopt
+# This has not been tested
+
 function BB.heuristics!(node::BB.JuMPNode)
-    #=
     ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
     exact_model = copy(node.model)
     buses = collect(keys(ref(pm, :bus)))
@@ -549,13 +585,13 @@ function BB.heuristics!(node::BB.JuMPNode)
     JuMP.optimize!(exact_model)
     node.best_incumbent = JuMP.objective_value(exact_model)
     JuMP.set_optimizer(node.model, optimizer)
-    =#
 end
+=#
 
 ###########################################################################
 #                     Helper Functions for Debugging                      #
 ###########################################################################
-
+#=
 function total_num_constraints(model::JuMP.Model)::Int64
     sum = 0
     for (i,j) in JuMP.list_of_constraint_types(model)
@@ -569,6 +605,11 @@ function print_model_to_file(model::JuMP.Model, id::String)
     print(f, model)
     close(f)
 end
+=#
+
+###########################################################################
+#                          Initialization Method                          #
+###########################################################################
 
 function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNode}
     # collect data

@@ -175,16 +175,19 @@ function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     max_lambda = -Inf
     max_id = ()
     node_solution = node.solution
+    eigenvalues = Dict()
     for (raw_i,raw_j) in ids(pm, :buspairs)
         i = lookup_w_index[raw_i]
         j = lookup_w_index[raw_j]
         lambda = 0.5 * (node_solution[wr[i,i]] + node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
+        eigenvalues[(raw_i, raw_j)] = lambda
         # println(lambda)
         if lambda > max_lambda
             max_id = (raw_i,raw_j)
             max_lambda = lambda
         end
     end
+    node.auxiliary_data["eigenvalues"] = eigenvalues
     # println()
     # println(max_lambda)
     return max_id
@@ -428,10 +431,8 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             root.auxiliary_data["best_bound"] = node.bound
             root.auxiliary_data["best_id"] = node.id
         end
-        delete_prev_branch_constr!(model, node)
         @info " Fathomed by bound"
     elseif node.depth >= 100
-        delete_prev_branch_constr!(model, node)
         @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
         # update the node with best bound (including processed ones), recorded in root
@@ -486,7 +487,6 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         BB.push!(tree, child_up)
         BB.push!(tree, child_down)
     else
-        delete_prev_branch_constr!(model, node)
         @info " Fathomed by solution status: $(node.solution_status)"
     end
 end

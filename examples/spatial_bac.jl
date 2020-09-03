@@ -175,15 +175,18 @@ function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     max_lambda = -Inf
     max_id = ()
     node_solution = node.solution
-    for ((raw_i,raw_j),_) in ref(pm, :buspairs)
+    for (raw_i,raw_j) in ids(pm, :buspairs)
         i = lookup_w_index[raw_i]
         j = lookup_w_index[raw_j]
-        lambda = 0.5 * (node_solution[wr[i,i]] - node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
+        lambda = 0.5 * (node_solution[wr[i,i]] + node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
+        # println(lambda)
         if lambda > max_lambda
             max_id = (raw_i,raw_j)
             max_lambda = lambda
         end
     end
+    # println()
+    # println(max_lambda)
     return max_id
 end
 
@@ -421,13 +424,13 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     root = find_root(node)
     model = root.model
     if node.bound >= tree.best_incumbent
-        if isapprox(node.bound, tree.best_incumbent, atol = 3)
+        if isapprox(node.bound, tree.best_incumbent, atol = 1e-5)
             root.auxiliary_data["best_bound"] = node.bound
             root.auxiliary_data["best_id"] = node.id
         end
         delete_prev_branch_constr!(model, node)
         @info " Fathomed by bound"
-    elseif node.depth >= 10
+    elseif node.depth >= 100
         delete_prev_branch_constr!(model, node)
         @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
@@ -491,7 +494,7 @@ end
 # implement depth first rule
 function BB.next_node(tree::BB.AbstractTree)
     # sort! is redefined to find the node with maximum depth (consistent with the paper's implementation)
-    sort!(tree::BB.AbstractTree) = Base.sort!(tree.nodes, by=x->x.depth)
+    # sort!(tree::BB.AbstractTree) = Base.sort!(tree.nodes, by=x->x.depth)
     BB.sort!(tree)
     node = Base.pop!(tree.nodes)
     return node

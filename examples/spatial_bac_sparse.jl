@@ -13,7 +13,7 @@ const MAX_NODE_ALLOWED = 10000
 ###########################################################################
 
 # A new type specifically for spatial branch and bound, essentially SDPWRMPowerModel
-mutable struct NodeWRMPowerModel <: AbstractWRMModel @pm_fields end
+mutable struct NodeWRMPowerModel <: AbstractSparseSDPWRMModel @pm_fields end
 
 # A new branch type, mapping (Wij, Tij) to their lower and upper bounds
 mutable struct ComplexVariableBranch <: BB.AbstractBranch
@@ -55,13 +55,10 @@ function create_sbc_branch(i::Int64, j::Int64, prev_node::BB.AbstractNode)
     root = find_root(prev_node)
     pm = root.auxiliary_data["PM"]
     bus_ids = ids(pm, :bus)
-    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
-    widx_i = lookup_w_index[i]
-    widx_j = lookup_w_index[j]
-    wii = var(pm, :WR)[widx_i,widx_i]
-    wjj = var(pm, :WR)[widx_j,widx_j]
-    wr = var(pm, :WR)[widx_i,widx_j]
-    wi = var(pm, :WI)[widx_i,widx_j]
+    wii = var(pm, :w, i)
+    wjj = var(pm, :w, j)
+    wr = var(pm, :wr)[i, j]
+    wi = var(pm, :wi)[i, j]
     bounds = get_LU_from_branches(prev_node, i, j)
     πs = compute_π(bounds)
     return SpatialBCBranch(i, j, wii, wjj, wr, wi, nothing, bounds, πs)
@@ -169,9 +166,9 @@ end
 function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     pm = find_root(node).auxiliary_data["PM"]
     bus_ids = ids(pm, :bus)
-    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
-    wr = var(pm, :WR)
-    wi = var(pm, :WI)
+    w = var(pm, :w)
+    wr = var(pm, :wr)
+    wi = var(pm, :wi)
     max_lambda = -Inf
     max_id = ()
     node_solution = node.solution
@@ -184,14 +181,12 @@ function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     #         println("Smallest eigenvalue for index pair ($(k), $(l)): ", lambda)
     #     end
     # end
-    for (raw_i,raw_j) in ids(pm, :buspairs)
-        i = lookup_w_index[raw_i]
-        j = lookup_w_index[raw_j]
-        lambda = 0.5 * (node_solution[wr[i,i]] + node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
-        eigenvalues[(raw_i, raw_j)] = lambda
+    for (i,j) in ids(pm, :buspairs)
+        lambda = 0.5 * (node_solution[w[i]] + node_solution[w[j]] - norm( [node_solution[w[i]] - node_solution[w[j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
+        eigenvalues[(i,j)] = lambda
         # println(lambda)
         if lambda > max_lambda
-            max_id = (raw_i,raw_j)
+            max_id = (i,j)
             max_lambda = lambda
         end
     end
@@ -425,7 +420,7 @@ function branch_copy(branch::SpatialBCBranch)
 end
 
 function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
-    # @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
+    @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     root = find_root(node)
     model = root.model
     if node.bound >= tree.best_incumbent
@@ -440,23 +435,24 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             root.auxiliary_data["best_id"] = node.id
         end
         # @info " Fathomed by maximum depth"
-    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
-        # determine the complex entry to branch on based on solution
+    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.ALMOST_OPTIMAL]
         if node.bound > root.auxiliary_data["best_bound"]
             root.auxiliary_data["best_bound"] = node.bound
             root.auxiliary_data["best_id"] = node.id
         end
+
+        # determine the complex entry to branch on based on solution
         pm = root.auxiliary_data["PM"]
         (i,j) = find_min_eigen(node)
-        WR = var(pm, :WR)
-        WI = var(pm, :WI)
-        # w = value.([WR -WI; WI WR])
-        w = value.(WR) .+ im * value.(WI)
-        println(eigvals(w))
-        if node.auxiliary_data["eigenvalues"][(i,j)] <= 1e-5
-            # update the node with best bound (including processed ones), recorded in root    
+
+        if node.auxiliary_data["eigenvalues"][(i,j)] <= 1e-9
+            # update the node with best bound (including processed ones), recorded in root
             @info " Fathomed by reaching rank-1 solution"
         else
+            w = var(pm, :w)
+            wr = var(pm, :wr)
+            wi = var(pm, :wi)
+        
             new_sbc_branch = create_sbc_branch(i, j, node)
             (new_i,new_j) = find_branching_entry(new_sbc_branch, node)
     
@@ -470,21 +466,21 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             if new_i != new_j # branch on Wij
                 up_bounds_arr[5] = (up_bounds_arr[5] + up_bounds_arr[6]) / 2
                 down_bounds_arr[6] = (down_bounds_arr[5] + down_bounds_arr[6]) / 2
-                vpair = (PM.var(pm, :WR)[widx_new_i,widx_new_j], PM.var(pm, :WI)[widx_new_i,widx_new_j])
+                vpair = (wr[new_i,new_j], wi[new_i,new_j])
                 up_mod_branch = ComplexVariableBranch(Dict(vpair => up_bounds_arr[5]), Dict(vpair => up_bounds_arr[6]))
                 down_mod_branch = ComplexVariableBranch(Dict(vpair => down_bounds_arr[5]), Dict(vpair => down_bounds_arr[6]))
                 # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[5]),$(up_bounds_arr[5]),$(up_bounds_arr[6])]."
             elseif new_i == i # branch on Wii
                 up_bounds_arr[1] = (up_bounds_arr[1] + up_bounds_arr[2]) / 2
                 down_bounds_arr[2] = (down_bounds_arr[1] + down_bounds_arr[2]) / 2
-                v = PM.var(pm, :WR)[widx_new_i, widx_new_j]
+                v = w[new_i]
                 up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[1]), Dict(v => up_bounds_arr[2]))
                 down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[1]), Dict(v => down_bounds_arr[2]))
                 # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[1]),$(up_bounds_arr[1]),$(up_bounds_arr[2])]."
             else # branch on Wjj
                 up_bounds_arr[3] = (up_bounds_arr[3] + up_bounds_arr[4]) / 2
                 down_bounds_arr[4] = (down_bounds_arr[3] + down_bounds_arr[4]) / 2
-                v = PM.var(pm, :WR)[widx_new_i, widx_new_j]
+                v = w[new_i]
                 up_mod_branch = BB.VariableBranch(Dict(v => up_bounds_arr[3]), Dict(v => up_bounds_arr[4]))
                 down_mod_branch = BB.VariableBranch(Dict(v => down_bounds_arr[3]), Dict(v => down_bounds_arr[4]))
                 # @info " Branch at W$(new_i)$(new_j), [L, U] breaks into by [$(down_bounds_arr[3]),$(up_bounds_arr[3]),$(up_bounds_arr[4])]."
@@ -503,7 +499,6 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     else
         # @info " Fathomed by solution status: $(node.solution_status)"
     end
-    push!(root.auxiliary_data["best_bounds"], root.auxiliary_data["best_bound"])
 end
 
 # implement depth first rule
@@ -516,7 +511,7 @@ function BB.next_node(tree::BB.AbstractTree)
 end
 
 function BB.termination(tree::BB.AbstractTree)
-    # @info "Tree nodes: processed $(length(tree.processed)), left $(length(tree.nodes)), total $(tree.node_counter), best bound $(tree.best_bound), best incumbent $(tree.best_incumbent)"
+    @info "Tree nodes: processed $(length(tree.processed)), left $(length(tree.nodes)), total $(tree.node_counter), best bound $(tree.best_bound), best incumbent $(tree.best_incumbent)"
     if BB.isempty(tree)
         # @info "Completed the tree search"
         return true
@@ -543,7 +538,7 @@ function BB.bound!(node::BB.JuMPNode)
         node.bound = Inf
     elseif node.solution_status == MOI.DUAL_INFEASIBLE || JuMP.primal_status(model) in [MOI.INFEASIBILITY_CERTIFICATE]
         node.bound = -Inf
-    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
+    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.ALMOST_OPTIMAL]
         node.bound = JuMP.objective_value(model)
         vrefs = JuMP.all_variables(model)
         for v in vrefs
@@ -654,7 +649,6 @@ function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNo
         node.auxiliary_data["Cuts"]["angle_lb"][(f_bus, t_bus)] = @constraint(pm.model, Lij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] <= wi[(f_bus, t_bus)])
         node.auxiliary_data["Cuts"]["angle_ub"][(f_bus, t_bus)] = @constraint(pm.model, Uij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] >= wi[(f_bus, t_bus)])
     end
-    node.auxiliary_data["best_bounds"] = []
 
     tree = BB.initialize_tree(node)
 

@@ -1,7 +1,7 @@
 # Main file for the spatial branch-and-cut
 
 include("./spatial_bac.jl")
-
+# include("./spatial_bac_sparse.jl")
 
 # read data, and formulate root model using PowerModels
 # file = "/home/weiqizhang/anl/pglib-opf/pglib_opf_case3_lmbd.m"
@@ -16,6 +16,7 @@ file = "/home/weiqizhang/anl/pglib-opf/pglib_opf_case5_pjm.m"
 data = parse_file(file)
 pm = instantiate_model(data, NodeWRMPowerModel, build_opf)
 optimizer = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
+# optimizer = optimizer_with_attributes(SCS.Optimizer, "max_iters" => 10000, "eps" => 1e-4, "verbose" => 0)
 set_optimizer(pm.model, optimizer)
 
 tree, node = initialize(pm)

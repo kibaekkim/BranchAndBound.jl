@@ -17,4 +17,24 @@ function analyze_tree_bounds(tree::BB.AbstractTree)
     end
 end
 
-analyze_tree_bounds(tree)
+function analyze_node_bounds(tree::BB.AbstractTree)
+    nodes = tree.processed
+    sort!(nodes, by = x->x.depth, rev = true)
+    visited = []
+    count = 0
+    for node in nodes
+        pnode = node
+        while !isnothing(pnode.parent) && !(pnode.id in visited)
+            push!(visited, pnode.id)
+            if pnode.bound < pnode.parent.bound
+                count = count + 1
+                println("Parent node $(pnode.parent.id) has bound $(pnode.parent.bound), child node $(pnode.id) has bound $(pnode.bound)")
+            end
+            pnode = pnode.parent
+        end
+    end
+    println("Percent of branches that have reverse bound order: $(float(count / (length(nodes) - 1)) * 100)%")
+end
+
+# analyze_tree_bounds(tree)
+analyze_node_bounds(tree)

@@ -167,7 +167,8 @@ end
 
 # This function finds the line index (i,j) that the corresponding 2-by-2 W matrix attains the maximum λmin
 function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
-    pm = find_root(node).auxiliary_data["PM"]
+    root = find_root(node)
+    pm = root.auxiliary_data["PM"]
     bus_ids = ids(pm, :bus)
     lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
     wr = var(pm, :WR)
@@ -184,7 +185,7 @@ function find_min_eigen(node::BB.AbstractNode)::Tuple{Int64, Int64}
     #         println("Smallest eigenvalue for index pair ($(k), $(l)): ", lambda)
     #     end
     # end
-    for (raw_i,raw_j) in ids(pm, :buspairs)
+    for (raw_i,raw_j) in keys(root.auxiliary_data["Cuts"]["angle_lb"])
         i = lookup_w_index[raw_i]
         j = lookup_w_index[raw_j]
         lambda = 0.5 * (node_solution[wr[i,i]] + node_solution[wr[j,j]] - norm( [node_solution[wr[i,i]] - node_solution[wr[j,j]], 2 * node_solution[wr[i,j]], 2 * node_solution[wi[i,j]]] ) )
@@ -425,7 +426,7 @@ function branch_copy(branch::SpatialBCBranch)
 end
 
 function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
-    # @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
+    @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     root = find_root(node)
     model = root.model
     if node.bound >= tree.best_incumbent
@@ -442,20 +443,21 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         # @info " Fathomed by maximum depth"
     elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
         # determine the complex entry to branch on based on solution
-        if node.bound > root.auxiliary_data["best_bound"]
-            root.auxiliary_data["best_bound"] = node.bound
-            root.auxiliary_data["best_id"] = node.id
-        end
         pm = root.auxiliary_data["PM"]
         (i,j) = find_min_eigen(node)
         WR = var(pm, :WR)
         WI = var(pm, :WI)
         # w = value.([WR -WI; WI WR])
         w = value.(WR) .+ im * value.(WI)
-        println(eigvals(w))
-        if node.auxiliary_data["eigenvalues"][(i,j)] <= 1e-5
-            # update the node with best bound (including processed ones), recorded in root    
-            @info " Fathomed by reaching rank-1 solution"
+        eigvs = eigvals(w)
+        # println(eigvs)
+        # if node.auxiliary_data["eigenvalues"][(i,j)] <= 1e-8
+        if eigvs[end-1] <= 5e-5
+            # update the node with best bound (including processed ones), recorded in root
+            if eigvs[end] > 5e-5
+                root.auxiliary_data["rank1"][node.id] = node.bound
+            end
+            # @info " Fathomed by reaching rank-1 solution"
         else
             new_sbc_branch = create_sbc_branch(i, j, node)
             (new_i,new_j) = find_branching_entry(new_sbc_branch, node)
@@ -516,7 +518,7 @@ function BB.next_node(tree::BB.AbstractTree)
 end
 
 function BB.termination(tree::BB.AbstractTree)
-    # @info "Tree nodes: processed $(length(tree.processed)), left $(length(tree.nodes)), total $(tree.node_counter), best bound $(tree.best_bound), best incumbent $(tree.best_incumbent)"
+    @info "Tree nodes: processed $(length(tree.processed)), left $(length(tree.nodes)), total $(tree.node_counter), best bound $(tree.best_bound), best incumbent $(tree.best_incumbent)"
     if BB.isempty(tree)
         # @info "Completed the tree search"
         return true
@@ -556,13 +558,13 @@ function BB.bound!(node::BB.JuMPNode)
     delete_prev_branch_constr!(model, node)
 end
 
-#=
-# This is supposed to find an incumbent for each node, by converting SDP problem into rank-1 form and solving with Ipopt
-# This has not been tested
-
+# This finds an incumbent for each node, by converting SDP problem into rank-1 form and solving with Ipopt
 function BB.heuristics!(node::BB.JuMPNode)
+    #=
     ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
-    exact_model = copy(node.model)
+    root = find_root(node)
+    tree = root.auxiliary_data["tree"]
+    exact_model = copy(root.model)
     buses = collect(keys(ref(pm, :bus)))
     JuMP.@variable(exact_model, vr[buses])
     JuMP.@variable(exact_model, vi[buses])
@@ -595,16 +597,50 @@ function BB.heuristics!(node::BB.JuMPNode)
     for cref in soc_crefs
         cobj = JuMP.constraint_object(cref)
         terms = cobj.func
-        JuMP.@constraint(exact_model, sum(terms[i]^2 for i in 1:length(terms)) <= terms[1]^2)
+        JuMP.@constraint(exact_model, sum(terms[i]^2 for i in 2:length(terms)) <= terms[1]^2)
+        JuMP.delete(exact_model, cref)
+    end
+
+    # convert rotated second order cone constraints into quadratic constraints (this is needed if objective is quadratic)
+    rsoc_crefs = JuMP.all_constraints(exact_model, Array{GenericAffExpr{Float64, VariableRef}, 1}, MOI.RotatedSecondOrderCone)
+    for cref in rsoc_crefs
+        cobj = JuMP.constraint_object(cref)
+        terms = cobj.func
+        JuMP.@constraint(exact_model, sum(terms[i]^2 for i in 3:length(terms)) <= 2 * terms[1].constant * terms[2]) # hacky way to avoid higher order (nonlinear) terms
         JuMP.delete(exact_model, cref)
     end
 
     JuMP.set_optimizer(exact_model, ipopt_optimizer)
+    JuMP.set_start_value.(JuMP.all_variables(exact_model), 1.)
     JuMP.optimize!(exact_model)
-    node.best_incumbent = JuMP.objective_value(exact_model)
-    JuMP.set_optimizer(node.model, optimizer)
-end
+    @info " Heuristics result: $(objective_value(exact_model))"
+    exact_term_status = JuMP.termination_status(exact_model)
+#=
+    # run exact_model with random start values if 
+    num_runs = 0
+    while exact_term_status != MOI.LOCALLY_SOLVED && num_runs < 10
+        num_runs = num_runs + 1
+        all_vars = JuMP.all_variables(exact_model)
+        JuMP.set_start_value.(all_vars, rand(length(all_vars)))
+        JuMP.optimize!(exact_model)
+        exact_term_status = JuMP.termination_status(exact_model)
+        
+        # print warning at exit if needed
+        if num_runs == 10 && exact_term_status != MOI.LOCALLY_SOLVED
+            @info "  Warning: node exact model is not solved to local optimality. "
+        end
+    end
 =#
+    if exact_term_status != MOI.LOCALLY_SOLVED
+        @info "  Warning: node exact model is not solved to local optimality. "
+    end
+
+    if exact_term_status == MOI.LOCALLY_SOLVED && tree.best_incumbent >= JuMP.objective_value(exact_model)
+        @info "  Updating tree best incumbent. Exact model termination status: $(termination_status(exact_model))"
+        tree.best_incumbent = JuMP.objective_value(exact_model)
+    end
+    =#
+end
 
 ###########################################################################
 #                     Helper Functions for Debugging                      #
@@ -630,6 +666,8 @@ end
 ###########################################################################
 
 function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNode}
+    M = 10000 # slack bound for non-line voltage product
+
     # collect data
     Lii = Dict(i => bus["vmin"]^2 for (i, bus) in ref(pm, :bus))
     Uii = Dict(i => bus["vmax"]^2 for (i, bus) in ref(pm, :bus))
@@ -654,9 +692,25 @@ function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNo
         node.auxiliary_data["Cuts"]["angle_lb"][(f_bus, t_bus)] = @constraint(pm.model, Lij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] <= wi[(f_bus, t_bus)])
         node.auxiliary_data["Cuts"]["angle_ub"][(f_bus, t_bus)] = @constraint(pm.model, Uij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] >= wi[(f_bus, t_bus)])
     end
+
+    bus_ids = ids(pm, :bus)
+    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
+    WR = var(pm, :WR)
+    WI = var(pm, :WI)
+    for i in ids(pm, :bus), j in ids(pm, :bus)
+        if i != j && !((i,j) in keys(node.auxiliary_data["Cuts"]["angle_lb"])) && !((j,i) in keys(node.auxiliary_data["Cuts"]["angle_lb"]))
+            Lij[(i,j)] = -M
+            Uij[(i,j)] = M
+            node.auxiliary_data["Cuts"]["angle_lb"][(i,j)] = @constraint(pm.model, -M * WR[lookup_w_index[i], lookup_w_index[j]] <= WI[lookup_w_index[i], lookup_w_index[j]])
+            node.auxiliary_data["Cuts"]["angle_ub"][(i,j)] = @constraint(pm.model, M * WR[lookup_w_index[i], lookup_w_index[j]] >= WI[lookup_w_index[i], lookup_w_index[j]])
+        end
+    end
+
     node.auxiliary_data["best_bounds"] = []
+    node.auxiliary_data["rank1"] = Dict()
 
     tree = BB.initialize_tree(node)
+    node.auxiliary_data["tree"] = tree
 
     # set incumbent
     ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)

@@ -5,7 +5,8 @@ const BB = BranchAndBound
 const PM = PowerModels
 
 const MOSEK_OPTIMIZER = optimizer_with_attributes(Mosek.Optimizer, "QUIET" => true)
-const SCS_OPTIMIZER = optimizer_with_attributes(SCS.Optimizer, "max_iters" => 100000, "eps" => 1e-4, "verbose" => 0)
+# const SCS_OPTIMIZER = optimizer_with_attributes(SCS.Optimizer, "max_iters" => 100000, "eps" => 1e-4, "verbose" => 0)
+const SCS_OPTIMIZER = optimizer_with_attributes(SCS.Optimizer, "max_iters" => 100000, "verbose" => 0)
 const MAX_NODE_ALLOWED = 10000
 
 ###########################################################################
@@ -425,6 +426,57 @@ function branch_copy(branch::SpatialBCBranch)
                            branch.mod_branch, deepcopy(branch.bounds), deepcopy(branch.valid_ineq_coeffs))
 end
 
+# this uses trace minimization to test if the given incomplete wr, wi can recover a rank-1 complex matrix
+# if yes, wr and wi will be updated with the complete rank-1 solution, and the function returns true
+# if no, wr and wi will remain unchanged, and the function returns false
+# TODO: modify this so that it takes into account cut lines if necessary
+function min_trace_solution!(wr::Matrix{Float64}, wi::Matrix{Float64}, pm::AbstractPowerModel)::Bool
+    bus_ids = ids(pm, :bus)
+    n_bus = length(bus_ids)
+    lookup_w_index = Dict((bi, i) for (i, bi) in enumerate(bus_ids))
+
+    @info "--- Eigenvalues of W solution from SDP relaxation: " eigvals(wr + im .* wi)
+
+    # set up trace minimization
+    m = Model(SCS_OPTIMIZER)
+    @variable(m, XR[1:n_bus, 1:n_bus])
+    @variable(m, XI[1:n_bus, 1:n_bus])
+    @constraint(m, [XR -XI; XI XR] in PSDCone())
+    for i in bus_ids
+        @constraint(m, XR[i,i] == wr[i,i])
+    end
+    for (i,j) in ids(pm, :buspairs)
+        windex_i = lookup_w_index[i]
+        windex_j = lookup_w_index[j]
+        @constraint(m, XR[i,j] == wr[i,j])
+        @constraint(m, XI[i,j] == wi[i,j])
+        # @constraint(m, XR[j,i] == wr[j,i])
+        # @constraint(m, XI[j,i] == wi[j,i])
+    end
+    # TODO: add codes here to take into account cut lines if necessary (for network decomposition later)
+    @objective(m, Min, tr([XR -XI; XI XR]))
+    optimize!(m)
+    @info "--- Trace minimization termination status: $(JuMP.termination_status(m)) ---"
+
+    # eigenvalue test
+    sol = value.(XR) + im * value.(XI)
+    rk = rank(sol, rtol = 1e-5)
+    @info "--- Eigenvalues of W solution after trace minimization: " eigvals(sol)
+    @info "--- The rank of the trace minimization solution: $(rk) ---"
+    if rk == 1
+        wr = value.(XR)
+        wi = value.(XI)
+        return true
+    end
+    return false
+end
+
+# old version: simply check the w values returned by the solver, no special handling of free variables
+# function min_trace_solution!(wr::Matrix{Float64}, wi::Matrix{Float64}, pm::AbstractPowerModel)::Bool
+#     solution = wr + im .* wi
+#     return rank(solution, rtol = 1e-5) == 1
+# end
+
 function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
     @info " Node id $(node.id), status $(node.solution_status), bound $(node.bound)"
     root = find_root(node)
@@ -441,22 +493,22 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
             root.auxiliary_data["best_id"] = node.id
         end
         # @info " Fathomed by maximum depth"
-    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
+    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.ALMOST_OPTIMAL]
         # determine the complex entry to branch on based on solution
         pm = root.auxiliary_data["PM"]
         (i,j) = find_min_eigen(node)
         WR = var(pm, :WR)
         WI = var(pm, :WI)
-        # w = value.([WR -WI; WI WR])
-        w = value.(WR) .+ im * value.(WI)
-        eigvs = eigvals(w)
+        wr = value.(WR)
+        wi = value.(WI)
+        is_rank1 = min_trace_solution!(wr, wi, root.auxiliary_data["PM"]) # this implements trace minimization for rank-1 check and recovery
+        # eigvs = eigvals(w)
         # println(eigvs)
         # if node.auxiliary_data["eigenvalues"][(i,j)] <= 1e-8
-        if eigvs[end-1] <= 5e-5
+        # if eigvs[end-1] <= 5e-5
+        if is_rank1
             # update the node with best bound (including processed ones), recorded in root
-            if eigvs[end] > 5e-5
-                root.auxiliary_data["rank1"][node.id] = node.bound
-            end
+            root.auxiliary_data["rank1"][node.id] = node.bound
             # @info " Fathomed by reaching rank-1 solution"
         else
             new_sbc_branch = create_sbc_branch(i, j, node)
@@ -506,6 +558,7 @@ function BB.branch!(tree::BB.AbstractTree, node::BB.AbstractNode)
         # @info " Fathomed by solution status: $(node.solution_status)"
     end
     push!(root.auxiliary_data["best_bounds"], root.auxiliary_data["best_bound"])
+    delete_prev_branch_constr!(model, node)
 end
 
 # implement depth first rule
@@ -545,7 +598,7 @@ function BB.bound!(node::BB.JuMPNode)
         node.bound = Inf
     elseif node.solution_status == MOI.DUAL_INFEASIBLE || JuMP.primal_status(model) in [MOI.INFEASIBILITY_CERTIFICATE]
         node.bound = -Inf
-    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS]
+    elseif node.solution_status in [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.ALMOST_OPTIMAL]
         node.bound = JuMP.objective_value(model)
         vrefs = JuMP.all_variables(model)
         for v in vrefs
@@ -555,12 +608,12 @@ function BB.bound!(node::BB.JuMPNode)
         @warn "Unexpected node solution status: $(node.solution_status)"
         node.bound = -Inf
     end
-    delete_prev_branch_constr!(model, node)
+    # delete_prev_branch_constr!(model, node)
 end
 
 # This finds an incumbent for each node, by converting SDP problem into rank-1 form and solving with Ipopt
 function BB.heuristics!(node::BB.JuMPNode)
-    #=
+#=
     ipopt_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
     root = find_root(node)
     tree = root.auxiliary_data["tree"]
@@ -639,7 +692,7 @@ function BB.heuristics!(node::BB.JuMPNode)
         @info "  Updating tree best incumbent. Exact model termination status: $(termination_status(exact_model))"
         tree.best_incumbent = JuMP.objective_value(exact_model)
     end
-    =#
+=#
 end
 
 ###########################################################################
@@ -666,7 +719,7 @@ end
 ###########################################################################
 
 function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNode}
-    M = 10000 # slack bound for non-line voltage product
+    # M = 10000 # slack bound for non-line voltage product
 
     # collect data
     Lii = Dict(i => bus["vmin"]^2 for (i, bus) in ref(pm, :bus))
@@ -693,18 +746,18 @@ function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNo
         node.auxiliary_data["Cuts"]["angle_ub"][(f_bus, t_bus)] = @constraint(pm.model, Uij[(f_bus, t_bus)] * wr[(f_bus, t_bus)] >= wi[(f_bus, t_bus)])
     end
 
-    bus_ids = ids(pm, :bus)
-    lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
-    WR = var(pm, :WR)
-    WI = var(pm, :WI)
-    for i in ids(pm, :bus), j in ids(pm, :bus)
-        if i != j && !((i,j) in keys(node.auxiliary_data["Cuts"]["angle_lb"])) && !((j,i) in keys(node.auxiliary_data["Cuts"]["angle_lb"]))
-            Lij[(i,j)] = -M
-            Uij[(i,j)] = M
-            node.auxiliary_data["Cuts"]["angle_lb"][(i,j)] = @constraint(pm.model, -M * WR[lookup_w_index[i], lookup_w_index[j]] <= WI[lookup_w_index[i], lookup_w_index[j]])
-            node.auxiliary_data["Cuts"]["angle_ub"][(i,j)] = @constraint(pm.model, M * WR[lookup_w_index[i], lookup_w_index[j]] >= WI[lookup_w_index[i], lookup_w_index[j]])
-        end
-    end
+    # bus_ids = ids(pm, :bus)
+    # lookup_w_index = Dict((bi,i) for (i,bi) in enumerate(bus_ids))
+    # WR = var(pm, :WR)
+    # WI = var(pm, :WI)
+    # for i in ids(pm, :bus), j in ids(pm, :bus)
+    #     if i != j && !((i,j) in keys(node.auxiliary_data["Cuts"]["angle_lb"])) && !((j,i) in keys(node.auxiliary_data["Cuts"]["angle_lb"]))
+    #         Lij[(i,j)] = -M
+    #         Uij[(i,j)] = M
+    #         node.auxiliary_data["Cuts"]["angle_lb"][(i,j)] = @constraint(pm.model, -M * WR[lookup_w_index[i], lookup_w_index[j]] <= WI[lookup_w_index[i], lookup_w_index[j]])
+    #         node.auxiliary_data["Cuts"]["angle_ub"][(i,j)] = @constraint(pm.model, M * WR[lookup_w_index[i], lookup_w_index[j]] >= WI[lookup_w_index[i], lookup_w_index[j]])
+    #     end
+    # end
 
     node.auxiliary_data["best_bounds"] = []
     node.auxiliary_data["rank1"] = Dict()

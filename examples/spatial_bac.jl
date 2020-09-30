@@ -460,8 +460,9 @@ function min_trace_solution!(wr::Matrix{Float64}, wi::Matrix{Float64}, pm::Abstr
 
     # eigenvalue test
     sol = value.(XR) + im * value.(XI)
+    @info "--- Trace minimization solution: " sol
     rk = rank(sol, rtol = 1e-5)
-    @info "--- Eigenvalues of W solution after trace minimization: " eigvals(sol)
+    @info "--- Eigenvalues of W solution after trace minimization: " svdvals(sol)
     @info "--- The rank of the trace minimization solution: $(rk) ---"
     if rk == 1
         wr = value.(XR)
@@ -718,7 +719,7 @@ end
 #                          Initialization Method                          #
 ###########################################################################
 
-function initialize(pm::NodeWRMPowerModel)::Tuple{BB.AbstractTree, BB.AbstractNode}
+function initialize(pm::NodeWRMPowerModel, file::String)::Tuple{BB.AbstractTree, BB.AbstractNode}
     # M = 10000 # slack bound for non-line voltage product
 
     # collect data

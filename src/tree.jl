@@ -13,8 +13,8 @@ end
 
 function run(tree::AbstractTree)
     while !termination(tree)
-        node = next_node(tree)
         update_best_bound!(tree)
+        node = next_node(tree)
 
         bound!(node)
         heuristics!(node)

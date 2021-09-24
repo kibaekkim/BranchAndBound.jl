@@ -69,9 +69,9 @@ function bound!(node::JuMPNode)
             node.solution[v] = JuMP.value(v)
         end
     elseif node.solution_status in [MOI.INFEASIBLE,MOI.LOCALLY_INFEASIBLE]
-        node.bound = -Inf
-    elseif node.solution_status == MOI.DUAL_INFEASIBLE
         node.bound = Inf
+    elseif node.solution_status == MOI.DUAL_INFEASIBLE
+        node.bound = -Inf
     else
         @warn "Unexpected node solution status: $(node.solution_status)"
         node.bound = -Inf
